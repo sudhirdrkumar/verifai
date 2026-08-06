@@ -1,0 +1,250 @@
+{
+  "total_rows": 1496,
+  "candidate_updates": 26,
+  "name_updates": 26,
+  "component_updates": 0,
+  "backup_table": "",
+  "mode": "dry_run",
+  "stats": {
+    "low_confidence": 1235,
+    "already_good": 216,
+    "no_match": 19,
+    "name_updated": 26
+  },
+  "sample_updates": [
+    {
+      "id": 43,
+      "old_name": "AMIKACIN 250mg",
+      "new_name": "amikacin 250 MG/ML",
+      "old_components": "amikacin",
+      "new_components": "amikacin",
+      "score": 0.9393,
+      "reason": "name_updated"
+    },
+    {
+      "id": 79,
+      "old_name": "Ampicillin 250 mg vial",
+      "new_name": "ampicillin 250 MG",
+      "old_components": "ampicillin + ampicillin / floxacillin",
+      "new_components": "ampicillin + ampicillin / floxacillin",
+      "score": 0.85,
+      "reason": "name_updated"
+    },
+    {
+      "id": 135,
+      "old_name": "AZITHROMYCIN 500 MG OD",
+      "new_name": "azithromycin 500 MG",
+      "old_components": "azithromycin",
+      "new_components": "azithromycin",
+      "score": 0.9028,
+      "reason": "name_updated"
+    },
+    {
+      "id": 263,
+      "old_name": "Ceftriaxone 1gm injection",
+      "new_name": "ceftriaxone Injection",
+      "old_components": "ceftriaxone",
+      "new_components": "ceftriaxone",
+      "score": 0.8907,
+      "reason": "name_updated"
+    },
+    {
+      "id": 284,
+      "old_name": "Cefuroxime 500 mg BD",
+      "new_name": "cefuroxime 500 MG",
+      "old_components": "cefuroxime",
+      "new_components": "cefuroxime",
+      "score": 0.8969,
+      "reason": "name_updated"
+    },
+    {
+      "id": 671,
+      "old_name": "Inj. Thiamine 500 mg",
+      "new_name": "thiamine 500 MG",
+      "old_components": "thiamine",
+      "new_components": "thiamine",
+      "score": 0.8621,
+      "reason": "name_updated"
+    },
+    {
+      "id": 677,
+      "old_name": "INJ.HYDROCORTISONE 100MG",
+      "new_name": "hydrocortisone 100 MG",
+      "old_components": "hydrocortisone",
+      "new_components": "hydrocortisone",
+      "score": 0.8878,
+      "reason": "name_updated"
+    },
+    {
+      "id": 769,
+      "old_name": "Linezolid 600",
+      "new_name": "linezolid 600 MG",
+      "old_components": "linezolid",
+      "new_components": "linezolid",
+      "score": 0.9346,
+      "reason": "name_updated"
+    },
+    {
+      "id": 771,
+      "old_name": "Linezolid 800 mg tablet",
+      "new_name": "linezolid 600 MG Oral Tablet",
+      "old_components": "linezolid",
+      "new_components": "linezolid",
+      "score": 0.8841,
+      "reason": "name_updated"
+    },
+    {
+      "id": 834,
+      "old_name": "Meropenem 1 gm injection",
+      "new_name": "meropenem Injection",
+      "old_components": "meropenem",
+      "new_components": "meropenem",
+      "score": 0.8846,
+      "reason": "name_updated"
+    },
+    {
+      "id": 842,
+      "old_name": "Meropenem 1G injection",
+      "new_name": "meropenem Injection",
+      "old_components": "meropenem",
+      "new_components": "meropenem",
+      "score": 0.9053,
+      "reason": "name_updated"
+    },
+    {
+      "id": 848,
+      "old_name": "Meropenem 1gm injection",
+      "new_name": "meropenem Injection",
+      "old_components": "meropenem",
+      "new_components": "meropenem",
+      "score": 0.8846,
+      "reason": "name_updated"
+    },
+    {
+      "id": 857,
+      "old_name": "meropenem injections",
+      "new_name": "meropenem Injection",
+      "old_components": "meropenem",
+      "new_components": "meropenem",
+      "score": 0.902,
+      "reason": "name_updated"
+    },
+    {
+      "id": 918,
+      "old_name": "Mikacin Injection",
+      "new_name": "amikacin Injection",
+      "old_components": "amikacin",
+      "new_components": "amikacin",
+      "score": 0.8992,
+      "reason": "name_updated"
+    },
+    {
+      "id": 1166,
+      "old_name": "Piperacillin-tazobactam (Piptaz injection)",
+      "new_name": "piperacillin / tazobactam Injection",
+      "old_components": "tazobactam + piperacillin + piperacillin / tazobactam",
+      "new_components": "tazobactam + piperacillin + piperacillin / tazobactam",
+      "score": 0.8875,
+      "reason": "name_updated"
+    },
+    {
+      "id": 1167,
+      "old_name": "Piperacillin-tazobactam (Piptaz)",
+      "new_name": "piperacillin / tazobactam",
+      "old_components": "tazobactam + piperacillin + piperacillin / tazobactam",
+      "new_components": "tazobactam + piperacillin + piperacillin / tazobactam",
+      "score": 0.848,
+      "reason": "name_updated"
+    },
+    {
+      "id": 1169,
+      "old_name": "piperacillin-tazobactam (Tazact)",
+      "new_name": "piperacillin / tazobactam",
+      "old_components": "piperacillin + tazobactam",
+      "new_components": "piperacillin + tazobactam",
+      "score": 0.848,
+      "reason": "name_updated"
+    },
+    {
+      "id": 1171,
+      "old_name": "Piperacillin-tazobactam 4.5 g",
+      "new_name": "piperacillin / tazobactam",
+      "old_components": "tazobactam + piperacillin + piperacillin / tazobactam",
+      "new_components": "tazobactam + piperacillin + piperacillin / tazobactam",
+      "score": 0.8957,
+      "reason": "name_updated"
+    },
+    {
+      "id": 1178,
+      "old_name": "Piptaz (piperacillin-tazobactam)",
+      "new_name": "piperacillin / tazobactam",
+      "old_components": "tazobactam + piperacillin + piperacillin / tazobactam",
+      "new_components": "tazobactam + piperacillin + piperacillin / tazobactam",
+      "score": 0.848,
+      "reason": "name_updated"
+    },
+    {
+      "id": 1256,
+      "old_name": "Saline nasal",
+      "new_name": "Ayr Saline Nasal",
+      "old_components": "SODIUM CHLORIDE",
+      "new_components": "SODIUM CHLORIDE",
+      "score": 0.898,
+      "reason": "name_updated"
+    },
+    {
+      "id": 1380,
+      "old_name": "Tazact (piperacillin-tazobactam)",
+      "new_name": "piperacillin / tazobactam",
+      "old_components": "tazobactam + piperacillin + piperacillin / tazobactam",
+      "new_components": "tazobactam + piperacillin + piperacillin / tazobactam",
+      "score": 0.848,
+      "reason": "name_updated"
+    },
+    {
+      "id": 1385,
+      "old_name": "Tazim (piperacillin-tazobactam)",
+      "new_name": "piperacillin / tazobactam",
+      "old_components": "tazobactam + piperacillin + piperacillin / tazobactam",
+      "new_components": "tazobactam + piperacillin + piperacillin / tazobactam",
+      "score": 0.8633,
+      "reason": "name_updated"
+    },
+    {
+      "id": 1422,
+      "old_name": "Tigecycline 50mg IV",
+      "new_name": "tigecycline 50 MG",
+      "old_components": "tigecycline",
+      "new_components": "tigecycline",
+      "score": 0.8969,
+      "reason": "name_updated"
+    },
+    {
+      "id": 1466,
+      "old_name": "Vigamox 0.5%",
+      "new_name": "Vigamox",
+      "old_components": "moxifloxacin",
+      "new_components": "moxifloxacin",
+      "score": 0.9313,
+      "reason": "name_updated"
+    },
+    {
+      "id": 1475,
+      "old_name": "Vitamin D3 drop",
+      "new_name": "vitamin D3",
+      "old_components": "cholecalciferol",
+      "new_components": "cholecalciferol",
+      "score": 0.85,
+      "reason": "name_updated"
+    },
+    {
+      "id": 1495,
+      "old_name": "Zoledronic acid 40mg",
+      "new_name": "zoledronic acid",
+      "old_components": "zoledronic acid + zoledronic acid anhydrous",
+      "new_components": "zoledronic acid + zoledronic acid anhydrous",
+      "score": 0.8438,
+      "reason": "name_updated"
+    }
+  ]
+}

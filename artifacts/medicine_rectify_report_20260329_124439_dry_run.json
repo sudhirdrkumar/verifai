@@ -1,0 +1,25 @@
+{
+  "total_rows": 60,
+  "candidate_updates": 1,
+  "name_updates": 1,
+  "component_updates": 0,
+  "backup_table": "",
+  "mode": "dry_run",
+  "stats": {
+    "low_confidence": 47,
+    "already_good": 11,
+    "no_match": 1,
+    "name_updated": 1
+  },
+  "sample_updates": [
+    {
+      "id": 43,
+      "old_name": "AMIKACIN 250mg",
+      "new_name": "amikacin 250 MG/ML",
+      "old_components": "amikacin",
+      "new_components": "amikacin",
+      "score": 0.9393,
+      "reason": "name_updated"
+    }
+  ]
+}

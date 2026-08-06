@@ -1,0 +1,45 @@
+# Virtual environments
+.venv/
+.venv-win/
+venv/
+env/
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# Logs
+*.log
+logs/
+
+# Database
+*.db
+*.sqlite
+*.sqlite3
+
+# Cache
+.cache/
+.pytest_cache/
+node_modules/
+dist/
+build/
+
+# Dependencies
+pip-log.txt
+pip-delete-this-directory.txt
+artifacts/*.dump

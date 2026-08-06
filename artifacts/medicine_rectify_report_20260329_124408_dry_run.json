@@ -1,0 +1,43 @@
+{
+  "total_rows": 180,
+  "candidate_updates": 3,
+  "name_updates": 3,
+  "component_updates": 0,
+  "backup_table": "",
+  "mode": "dry_run",
+  "stats": {
+    "low_confidence": 145,
+    "already_good": 30,
+    "no_match": 2,
+    "name_updated": 3
+  },
+  "sample_updates": [
+    {
+      "id": 43,
+      "old_name": "AMIKACIN 250mg",
+      "new_name": "amikacin 250 MG/ML",
+      "old_components": "amikacin",
+      "new_components": "amikacin",
+      "score": 0.9393,
+      "reason": "name_updated"
+    },
+    {
+      "id": 79,
+      "old_name": "Ampicillin 250 mg vial",
+      "new_name": "ampicillin 250 MG",
+      "old_components": "ampicillin + ampicillin / floxacillin",
+      "new_components": "ampicillin + ampicillin / floxacillin",
+      "score": 0.85,
+      "reason": "name_updated"
+    },
+    {
+      "id": 135,
+      "old_name": "AZITHROMYCIN 500 MG OD",
+      "new_name": "azithromycin 500 MG",
+      "old_components": "azithromycin",
+      "new_components": "azithromycin",
+      "score": 0.9028,
+      "reason": "name_updated"
+    }
+  ]
+}

@@ -1,0 +1,477 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>QC-BKP Monitor</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --bg-a: #f6f8f2;
+      --bg-b: #e6f1ef;
+      --surface: #ffffff;
+      --surface-soft: #f4f7fb;
+      --text: #1c2a35;
+      --muted: #567082;
+      --ok: #1f9d55;
+      --warn: #d48806;
+      --bad: #c53030;
+      --accent: #0b7285;
+      --radius: 16px;
+      --shadow: 0 12px 32px rgba(12, 32, 54, 0.12);
+    }
+
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: "Poppins", "Trebuchet MS", "Verdana", sans-serif;
+      color: var(--text);
+      background:
+        radial-gradient(circle at 10% 20%, rgba(11, 114, 133, 0.14), transparent 35%),
+        radial-gradient(circle at 80% 0%, rgba(31, 157, 85, 0.14), transparent 28%),
+        linear-gradient(140deg, var(--bg-a), var(--bg-b));
+      min-height: 100vh;
+    }
+
+    .wrap {
+      max-width: 1180px;
+      margin: 0 auto;
+      padding: 28px 18px 42px;
+    }
+
+    .hero {
+      background: linear-gradient(120deg, #103349, #0b7285);
+      color: #fff;
+      border-radius: var(--radius);
+      padding: 22px;
+      box-shadow: var(--shadow);
+    }
+
+    .hero h1 {
+      margin: 0 0 8px;
+      font-size: clamp(1.25rem, 2vw, 1.8rem);
+      letter-spacing: 0.2px;
+    }
+
+    .hero p {
+      margin: 0;
+      opacity: 0.92;
+      font-size: 0.95rem;
+    }
+
+    .toolbar {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      margin-top: 16px;
+      align-items: center;
+    }
+
+    button {
+      border: 0;
+      border-radius: 999px;
+      padding: 10px 16px;
+      font: inherit;
+      font-weight: 600;
+      cursor: pointer;
+      transition: transform 0.12s ease, opacity 0.12s ease;
+    }
+
+    button:hover { transform: translateY(-1px); }
+    button:disabled { opacity: 0.6; cursor: not-allowed; }
+
+    .btn-primary {
+      background: #f8b84e;
+      color: #2d2107;
+    }
+
+    .btn-alt {
+      background: #d6edf2;
+      color: #0e4253;
+    }
+
+    .auth-input {
+      border: 0;
+      border-radius: 10px;
+      padding: 9px 12px;
+      min-width: 180px;
+      font: inherit;
+    }
+
+    .grid {
+      margin-top: 18px;
+      display: grid;
+      gap: 14px;
+      grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+    }
+
+    .card {
+      background: var(--surface);
+      border-radius: var(--radius);
+      box-shadow: var(--shadow);
+      padding: 14px;
+      border: 1px solid rgba(17, 41, 61, 0.06);
+    }
+
+    .card h3 {
+      margin: 0 0 6px;
+      font-size: 0.95rem;
+    }
+
+    .status {
+      font-size: 0.84rem;
+      font-weight: 600;
+      display: inline-block;
+      margin-top: 8px;
+      padding: 4px 8px;
+      border-radius: 999px;
+      background: var(--surface-soft);
+      color: var(--muted);
+    }
+
+    .ok { color: var(--ok); background: #e8f7ee; }
+    .warn { color: var(--warn); background: #fff7e6; }
+    .bad { color: var(--bad); background: #fdebec; }
+
+    .split {
+      margin-top: 16px;
+      display: grid;
+      gap: 14px;
+      grid-template-columns: 1fr 1fr;
+    }
+
+    @media (max-width: 860px) {
+      .split { grid-template-columns: 1fr; }
+      .auth-input { min-width: 100%; }
+    }
+
+    .panel-title {
+      margin: 0 0 8px;
+      font-size: 1.02rem;
+    }
+
+    .mono {
+      font-family: "Consolas", "Cascadia Mono", monospace;
+      font-size: 0.84rem;
+      white-space: pre-wrap;
+      word-break: break-word;
+      max-height: 340px;
+      overflow: auto;
+      background: #0f2130;
+      color: #d9edf7;
+      border-radius: 12px;
+      padding: 12px;
+      margin: 0;
+    }
+
+    .muted {
+      color: var(--muted);
+      font-size: 0.9rem;
+      margin-top: 8px;
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <section class="hero">
+      <h1>QC-BKP Modernization Monitor</h1>
+      <p>Run concurrent API checks and a full smoke test from one screen.</p>
+      <div class="toolbar">
+        <input id="login-user" class="auth-input" type="text" placeholder="username">
+        <input id="login-pass" class="auth-input" type="password" placeholder="password">
+        <button id="btn-login" class="btn-alt">Login</button>
+        <span class="muted" id="auth-state">Not logged in</span>
+      </div>
+      <div class="toolbar">
+        <button id="btn-checks" class="btn-primary">Run Concurrent Checks</button>
+        <button id="btn-smoke" class="btn-alt">Run End-to-End Smoke Test</button>
+      </div>
+      <div class="muted" id="base-url"></div>
+    </section>
+
+    <section class="grid" id="checks-grid"></section>
+
+    <section class="split">
+      <article class="card">
+        <h3 class="panel-title">Smoke Test Summary</h3>
+        <p class="muted" id="summary">No smoke test run yet.</p>
+      </article>
+
+      <article class="card">
+        <h3 class="panel-title">Live Log</h3>
+        <pre class="mono" id="live-log">ready</pre>
+      </article>
+    </section>
+  </div>
+
+  <script>
+    const checksGrid = document.getElementById("checks-grid");
+    const liveLog = document.getElementById("live-log");
+    const summary = document.getElementById("summary");
+    const btnChecks = document.getElementById("btn-checks");
+    const btnSmoke = document.getElementById("btn-smoke");
+    const btnLogin = document.getElementById("btn-login");
+    const loginUser = document.getElementById("login-user");
+    const loginPass = document.getElementById("login-pass");
+    const authState = document.getElementById("auth-state");
+    const baseUrl = document.getElementById("base-url");
+    baseUrl.textContent = `Base URL: ${window.location.origin}`;
+
+    let accessToken = null;
+
+    function log(message, data) {
+      const ts = new Date().toLocaleTimeString();
+      let line = `[${ts}] ${message}`;
+      if (data !== undefined) {
+        line += `\n${JSON.stringify(data, null, 2)}`;
+      }
+      liveLog.textContent = `${line}\n\n${liveLog.textContent}`;
+    }
+
+    function statusClass(ok, warn) {
+      if (ok) return "status ok";
+      if (warn) return "status warn";
+      return "status bad";
+    }
+
+    function authHeaders(existingHeaders) {
+      const headers = new Headers(existingHeaders || {});
+      if (accessToken) {
+        headers.set("Authorization", `Bearer ${accessToken}`);
+      }
+      return headers;
+    }
+
+    async function fetchJson(url, options = {}, timeoutMs = 30000) {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), timeoutMs);
+      try {
+        const merged = {
+          ...options,
+          headers: authHeaders(options.headers),
+          signal: controller.signal
+        };
+        const resp = await fetch(url, merged);
+        const text = await resp.text();
+        let body = null;
+        try { body = text ? JSON.parse(text) : null; } catch (e) { body = text; }
+        if (!resp.ok) {
+          throw new Error(`HTTP ${resp.status}: ${typeof body === "string" ? body : JSON.stringify(body)}`);
+        }
+        return body;
+      } finally {
+        clearTimeout(timer);
+      }
+    }
+
+    function renderChecks(results) {
+      checksGrid.innerHTML = "";
+      for (const result of results) {
+        const card = document.createElement("article");
+        card.className = "card";
+        const h = document.createElement("h3");
+        h.textContent = result.name;
+        const d = document.createElement("div");
+        d.className = statusClass(result.ok, result.warn);
+        d.textContent = result.status;
+        const p = document.createElement("p");
+        p.className = "muted";
+        p.textContent = result.detail;
+        card.appendChild(h);
+        card.appendChild(d);
+        card.appendChild(p);
+        checksGrid.appendChild(card);
+      }
+    }
+
+    async function login() {
+      const username = loginUser.value.trim();
+      const password = loginPass.value;
+      if (!username || !password) {
+        log("Login failed", { error: "username and password are required" });
+        return;
+      }
+
+      btnLogin.disabled = true;
+      try {
+        const resp = await fetchJson("/api/v1/auth/login", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ username, password })
+        });
+        accessToken = resp.access_token;
+        authState.textContent = `Logged in: ${resp.user.username} (${resp.user.role})`;
+        log("Login success", { user: resp.user, expires_at: resp.expires_at });
+      } catch (err) {
+        accessToken = null;
+        authState.textContent = "Login failed";
+        log("Login failed", { error: err.message });
+      } finally {
+        btnLogin.disabled = false;
+      }
+    }
+
+    async function runConcurrentChecks() {
+      btnChecks.disabled = true;
+      log("Running concurrent checks...");
+
+      const checks = [
+        {
+          name: "Root API",
+          fn: async () => {
+            const body = await fetchJson("/");
+            return { status: "reachable", detail: body.message || "ok", ok: true };
+          }
+        },
+        {
+          name: "Health",
+          fn: async () => {
+            const body = await fetchJson("/api/v1/health");
+            const isOk = body.status === "ok";
+            return {
+              status: body.status || "unknown",
+              detail: `database: ${body.database || "unknown"}`,
+              ok: isOk,
+              warn: !isOk
+            };
+          }
+        },
+        {
+          name: "Auth /me",
+          fn: async () => {
+            if (!accessToken) {
+              return { status: "not_logged_in", detail: "login required for protected APIs", ok: false, warn: true };
+            }
+            const body = await fetchJson("/api/v1/auth/me");
+            return { status: "ok", detail: `${body.username} (${body.role})`, ok: true };
+          }
+        },
+        {
+          name: "Claims Read",
+          fn: async () => {
+            if (!accessToken) {
+              return { status: "skipped", detail: "login required", ok: false, warn: true };
+            }
+            const body = await fetchJson("/api/v1/claims?limit=5");
+            return { status: "ok", detail: `claims total: ${body.total}`, ok: true };
+          }
+        },
+        {
+          name: "OpenAPI",
+          fn: async () => {
+            const body = await fetchJson("/openapi.json");
+            const count = Object.keys(body.paths || {}).length;
+            return { status: "ok", detail: `routes: ${count}`, ok: true };
+          }
+        },
+        {
+          name: "Checklist Routes",
+          fn: async () => {
+            const body = await fetchJson("/openapi.json");
+            const paths = body.paths || {};
+            const hasEval = !!paths["/api/v1/claims/{claim_id}/checklist/evaluate"];
+            const hasLatest = !!paths["/api/v1/claims/{claim_id}/checklist/latest"];
+            const ok = hasEval && hasLatest;
+            return {
+              status: ok ? "ok" : "missing",
+              detail: ok ? "evaluate + latest routes present" : "checklist routes not registered",
+              ok,
+              warn: !ok
+            };
+          }
+        }
+      ];
+
+      const settled = await Promise.allSettled(
+        checks.map(async (c) => ({ name: c.name, ...(await c.fn()) }))
+      );
+
+      const normalized = settled.map((r, idx) => {
+        if (r.status === "fulfilled") return r.value;
+        return {
+          name: checks[idx].name,
+          status: "failed",
+          detail: r.reason?.message || "request failed",
+          ok: false
+        };
+      });
+
+      renderChecks(normalized);
+      log("Concurrent checks completed.", normalized);
+      btnChecks.disabled = false;
+    }
+
+    async function runSmokeTest() {
+      if (!accessToken) {
+        summary.textContent = "Smoke test requires login first.";
+        log("Smoke test blocked", { error: "login required" });
+        return;
+      }
+
+      btnSmoke.disabled = true;
+      summary.textContent = "Smoke test in progress...";
+      try {
+        const externalClaimId = `MON-${Date.now()}`;
+        const claim = await fetchJson("/api/v1/claims", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            external_claim_id: externalClaimId,
+            patient_name: "Monitor Smoke User",
+            priority: 3,
+            tags: ["monitor", "smoke"]
+          })
+        });
+        log("Claim created", claim);
+
+        const form = new FormData();
+        const text = "Claim ID: MON-1001\nPatient Name: Monitor Smoke User\nDiagnosis: test diagnosis";
+        const file = new Blob([text], { type: "text/plain" });
+        form.append("file", file, "monitor_smoke.txt");
+        form.append("uploaded_by", "monitor-ui");
+
+        const doc = await fetchJson(`/api/v1/claims/${claim.id}/documents`, {
+          method: "POST",
+          body: form
+        }, 60000);
+        log("Document uploaded", doc);
+
+        const extraction = await fetchJson(`/api/v1/documents/${doc.id}/extract`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ provider: "auto", actor_id: "monitor-ui" })
+        }, 90000);
+        log("Extraction completed", extraction);
+
+        const list = await fetchJson(`/api/v1/documents/${doc.id}/extractions`);
+        log("Extraction list fetched", list);
+
+        const checklist = await fetchJson(`/api/v1/claims/${claim.id}/checklist/evaluate`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ actor_id: "monitor-ui", force_source_refresh: true })
+        });
+        log("Checklist evaluated", checklist);
+
+        const checklistLatest = await fetchJson(`/api/v1/claims/${claim.id}/checklist/latest`);
+        log("Checklist latest fetched", checklistLatest);
+
+        summary.textContent =
+          `Done: claim ${claim.id}, document ${doc.id}, extraction ${extraction.id}, checklist ${checklist.recommendation} (${checklist.source_summary?.catalog_source || "unknown"})`;
+      } catch (err) {
+        summary.textContent = `Smoke test failed: ${err.message}`;
+        log("Smoke test failed", { error: err.message });
+      } finally {
+        btnSmoke.disabled = false;
+      }
+    }
+
+    btnLogin.addEventListener("click", login);
+    btnChecks.addEventListener("click", runConcurrentChecks);
+    btnSmoke.addEventListener("click", runSmokeTest);
+    runConcurrentChecks();
+  </script>
+</body>
+</html>

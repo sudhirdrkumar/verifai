@@ -1,0 +1,333 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>VerifAI Report Editor</title>
+  <style>
+    :root {
+      --bg: #eef3f8;
+      --card: #ffffff;
+      --line: #d8e2ef;
+      --line-soft: #e5ecf5;
+      --text: #1f2f46;
+      --muted: #587296;
+      --brand: #2b64a7;
+      --ok: #0f7a2a;
+      --err: #b42318;
+    }
+
+    body {
+      margin: 0;
+      font-family: "Outfit", "Segoe UI", Arial, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      overflow: hidden;
+    }
+
+    .topbar {
+      position: sticky;
+      top: 0;
+      z-index: 10;
+      background: #fff;
+      border-bottom: 1px solid var(--line);
+      padding: 10px 14px;
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      flex-wrap: wrap;
+    }
+
+    .title {
+      font-size: 15px;
+      font-weight: 700;
+      margin-right: auto;
+      min-width: 180px;
+    }
+
+    .btn {
+      border: 1px solid var(--brand);
+      background: var(--brand);
+      color: #fff;
+      border-radius: 8px;
+      padding: 7px 12px;
+      font-weight: 600;
+      cursor: pointer;
+    }
+
+    .btn.soft {
+      background: #fff;
+      color: var(--brand);
+      border-color: #b4c6de;
+    }
+
+    .btn:disabled {
+      opacity: 0.6;
+      cursor: not-allowed;
+    }
+
+    #save-status {
+      width: 100%;
+      font-size: 12px;
+      color: var(--muted);
+      min-height: 18px;
+      padding-top: 2px;
+    }
+
+    #save-status.ok { color: var(--ok); }
+    #save-status.err { color: var(--err); }
+
+    .layout {
+      --left-pane: 38%;
+      display: grid;
+      grid-template-columns: minmax(260px, var(--left-pane)) 8px minmax(360px, 1fr);
+      gap: 8px;
+      padding: 10px;
+      height: calc(100vh - 84px);
+      box-sizing: border-box;
+    }
+
+    .pane-resizer {
+      border-radius: 8px;
+      background: linear-gradient(180deg, #d8e4f3 0%, #c3d4ea 100%);
+      border: 1px solid #b3c7e0;
+      cursor: col-resize;
+      min-height: 120px;
+      user-select: none;
+      touch-action: none;
+      position: relative;
+    }
+
+    .pane-resizer::after {
+      content: "";
+      position: absolute;
+      left: 50%;
+      top: 50%;
+      width: 2px;
+      height: 40px;
+      transform: translate(-50%, -50%);
+      background: #7ea0c8;
+      border-radius: 3px;
+      box-shadow: 0 -8px 0 #7ea0c8, 0 8px 0 #7ea0c8;
+    }
+
+    .pane-resizer:hover,
+    .pane-resizer.is-dragging {
+      background: linear-gradient(180deg, #cadef5 0%, #aec6e5 100%);
+    }
+
+    .panel {
+      background: var(--card);
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      display: flex;
+      flex-direction: column;
+      min-height: 0;
+      overflow: hidden;
+    }
+
+    .panel-head {
+      padding: 10px 12px;
+      border-bottom: 1px solid var(--line-soft);
+      font-weight: 700;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .panel-body {
+      padding: 10px;
+      min-height: 0;
+      overflow: hidden;
+    }
+
+    .muted-small {
+      color: var(--muted);
+      font-size: 12px;
+    }
+
+    #report-editor {
+      height: 100%;
+      overflow: auto;
+      border: 1px solid #d6dfeb;
+      border-radius: 10px;
+      padding: 12px;
+      background: #fff;
+      outline: none;
+      font-size: 14px;
+      line-height: 1.45;
+    }
+
+    #report-editor:focus {
+      outline: 2px solid #9ec3f3;
+      outline-offset: 0;
+    }
+
+    .docs-wrap {
+      display: grid;
+      grid-template-rows: auto auto 1fr;
+      gap: 8px;
+      height: 100%;
+    }
+
+    .doc-select-row {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto auto auto;
+      gap: 8px;
+      align-items: center;
+    }
+
+    #doc-select {
+      width: 100%;
+      min-width: 0;
+      padding: 8px 10px;
+      border: 1px solid #b4c6de;
+      border-radius: 8px;
+      background: #fff;
+      color: var(--text);
+      font-size: 14px;
+    }
+
+    .doc-select-row .btn {
+      border-color: #b4c6de;
+      background: #fff;
+      color: #24558f;
+      min-width: 72px;
+      padding: 7px 10px;
+      font-size: 13px;
+    }
+
+    #doc-selected-name {
+      color: var(--muted);
+      font-size: 12px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    #doc-preview-container {
+      width: 100%;
+      height: 100%;
+      border: 1px solid #d6dfeb;
+      border-radius: 10px;
+      background: #fff;
+      overflow: hidden;
+    }
+
+    #doc-preview {
+      width: 100%;
+      height: 100%;
+      border: 0;
+      background: #fff;
+    }
+
+    #doc-preview-container:fullscreen {
+      border-radius: 0;
+      border: 0;
+      background: #0b1220;
+    }
+
+    #doc-preview-container:fullscreen #doc-preview {
+      width: 100vw;
+      height: 100vh;
+    }
+
+    table { border-collapse: collapse; width: 100%; }
+    th, td { border: 1px solid #222; padding: 8px; vertical-align: top; }
+    th { text-align: left; background: #f0d9d2; width: 260px; }
+
+    @media (max-width: 1180px) {
+      .layout {
+        grid-template-columns: minmax(220px, 0.95fr) 8px minmax(360px, 1.55fr);
+        gap: 8px;
+        padding: 8px;
+      }
+
+      .panel-head { padding: 8px 10px; }
+      .panel-body { padding: 8px; }
+      #report-editor { padding: 9px; font-size: 13px; }
+      .doc-select-row { gap: 6px; }
+      .doc-select-row .btn { min-width: 62px; padding: 6px 8px; font-size: 12px; }
+      #doc-select { font-size: 13px; padding: 7px 8px; }
+    }
+
+    @media (max-width: 860px) {
+      body { overflow: auto; }
+      .layout {
+        grid-template-columns: 1fr;
+        height: auto;
+      }
+      .pane-resizer { display: none; }
+
+      .panel { min-height: 420px; }
+      .doc-select-row { grid-template-columns: 1fr 1fr 1fr 1fr; }
+      .doc-select-row .btn { min-width: 0; }
+    }
+
+    @media print {
+      .topbar, .docs-panel { display: none; }
+      body { overflow: visible; background: #fff; }
+      .layout { display: block; height: auto; padding: 0; }
+      .panel { border: 0; border-radius: 0; }
+      .panel-body { padding: 0; }
+      #report-editor { padding: 0; min-height: auto; border: 0; border-radius: 0; }
+    }
+  </style>
+  <script>window.learningToolsRuntime = window.learningToolsRuntime || {};</script>
+</head>
+<body>
+  <div class="topbar">
+    <span class="title" id="report-title">Claim Report</span>
+    <button id="grammar-check-btn" class="btn soft" type="button">Grammar Check</button>
+    <button id="save-report-btn" class="btn" type="button">Save Report</button>
+    <button id="save-complete-btn" class="btn" type="button">Save + Completed</button>
+    <button id="reload-draft-btn" class="btn soft" type="button">Reload Draft</button>
+    <span id="save-status"></span>
+  </div>
+
+  <main class="layout" id="editor-layout">
+    <section class="panel report-panel">
+      <div class="panel-head">
+        <span>Report HTML</span>
+        <span class="muted-small" id="report-meta">editable</span>
+      </div>
+      <div class="panel-body">
+        <div id="report-editor" contenteditable="true"><p style="color:#8a94a6;">Loading report...</p></div>
+      </div>
+    </section>
+
+    <div id="pane-resizer" class="pane-resizer" role="separator" aria-label="Resize panels" aria-orientation="vertical" tabindex="0"></div>
+
+    <aside class="panel docs-panel">
+      <div class="panel-head">
+        <span>Documents</span>
+        <span class="muted-small" id="doc-count">0</span>
+      </div>
+      <div class="panel-body docs-wrap">
+        <div class="doc-select-row">
+          <select id="doc-select">
+            <option value="">Select document</option>
+          </select>
+          <button type="button" class="btn soft" id="doc-preview-btn">Preview</button>
+          <button type="button" class="btn soft" id="doc-open-btn">Open</button>
+          <button type="button" class="btn soft" id="doc-fullscreen-btn">Full Screen</button>
+        </div>
+        <div class="muted-small" id="doc-selected-name">No document selected.</div>
+        <div id="doc-preview-container"><iframe id="doc-preview" title="Document Preview"></iframe></div>
+      </div>
+    </aside>
+  </main>
+
+  <script src="/qc/public/report-editor.js?v=20260408"></script>
+</body>
+</html>
+
+
+
+
+
+
+
+
+

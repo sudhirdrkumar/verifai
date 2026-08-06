@@ -1,0 +1,312 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>VerifAI Login</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/qc/public/app.css?v=20260348">
+  <style>
+    body.login-page {
+      min-height: 100vh;
+      margin: 0;
+      padding: 16px;
+      display: grid;
+      place-items: center;
+      font-family: "Outfit", "Trebuchet MS", "Century Gothic", sans-serif;
+      background:
+        linear-gradient(135deg, rgba(5, 24, 51, 0.78), rgba(4, 27, 58, 0.86)),
+        url('/qc/public/assets/login-bg-veeriai.jpg') center center / cover no-repeat fixed;
+    }
+
+    .login-card {
+      width: min(560px, 94vw);
+      border-radius: 32px;
+      border: 1px solid rgba(136, 207, 248, 0.33);
+      background:
+        linear-gradient(155deg, rgba(4, 24, 53, 0.95), rgba(2, 17, 43, 0.97)),
+        radial-gradient(circle at 50% 112%, rgba(118, 187, 245, 0.25), transparent 52%);
+      box-shadow: 0 36px 70px rgba(1, 8, 26, 0.58);
+      padding: clamp(22px, 2.4vw, 32px);
+      color: #e7f5ff;
+      backdrop-filter: blur(3px);
+    }
+
+    .login-brand {
+      display: flex;
+      align-items: center;
+      gap: 14px;
+      margin-bottom: 16px;
+    }
+
+    .brand-avatar {
+      width: 66px;
+      height: 66px;
+      border-radius: 18px;
+      border: 1px solid rgba(140, 216, 255, 0.58);
+      background:
+        radial-gradient(circle at 30% 28%, #daf7ff, #a0defe 48%, #4ca7de 84%),
+        linear-gradient(180deg, #8fe2ff, #3f96d0);
+      box-shadow: 0 12px 28px rgba(92, 181, 234, 0.35);
+      position: relative;
+      flex-shrink: 0;
+    }
+
+    .brand-avatar::before,
+    .brand-avatar::after {
+      content: "";
+      position: absolute;
+      width: 10px;
+      height: 10px;
+      top: 23px;
+      border-radius: 50%;
+      background: #0d3251;
+      box-shadow: 0 0 0 2px rgba(173, 232, 255, 0.42);
+    }
+
+    .brand-avatar::before {
+      left: 17px;
+    }
+
+    .brand-avatar::after {
+      right: 17px;
+    }
+
+    .login-brand h2 {
+      margin: 0;
+      font-size: clamp(1.55rem, 1.5vw, 1.95rem);
+      color: #edf8ff;
+      line-height: 1.05;
+      letter-spacing: 0.01em;
+    }
+
+    .login-brand p {
+      margin: 6px 0 0;
+      color: #9fbad1;
+      font-size: clamp(0.95rem, 1vw, 1.02rem);
+      font-weight: 500;
+    }
+
+    .login-error {
+      margin: 10px 0 16px;
+      border: 1px solid rgba(255, 145, 145, 0.5);
+      background: rgba(134, 31, 40, 0.4);
+      color: #ffd5d5;
+      border-radius: 12px;
+      padding: 11px 14px;
+      font-weight: 600;
+      font-size: 0.96rem;
+    }
+
+    .login-field {
+      margin-bottom: 14px;
+    }
+
+    .login-field label {
+      display: inline-block;
+      margin-bottom: 8px;
+      color: #c5def0;
+      letter-spacing: 0.01em;
+      font-weight: 700;
+      font-size: clamp(0.95rem, 1vw, 1rem);
+    }
+
+    .login-field input {
+      width: 100%;
+      border-radius: 18px;
+      border: 1px solid rgba(93, 162, 209, 0.56);
+      background: rgba(18, 48, 82, 0.74);
+      color: #ebf7ff;
+      padding: 13px 15px;
+      font-size: clamp(0.98rem, 1.02vw, 1.05rem);
+      box-shadow: inset 0 0 0 1px rgba(183, 229, 255, 0.08);
+    }
+
+    .login-field input::placeholder {
+      color: #9ab6cb;
+    }
+
+    .login-field input:focus {
+      outline: none;
+      border-color: #8fdcff;
+      box-shadow: 0 0 0 3px rgba(88, 194, 245, 0.22);
+      background: rgba(17, 50, 86, 0.82);
+    }
+
+    .login-submit {
+      width: 100%;
+      margin-top: 12px;
+      border-radius: 18px;
+      border: 1px solid rgba(149, 230, 255, 0.62);
+      padding: 13px 14px;
+      background: linear-gradient(90deg, #4da4df, #79d5e9);
+      color: #072742;
+      font-size: clamp(1rem, 1.05vw, 1.08rem);
+      font-weight: 800;
+      letter-spacing: 0.02em;
+      box-shadow: 0 16px 30px rgba(38, 154, 214, 0.35);
+      cursor: pointer;
+      transition: filter 0.15s ease, transform 0.15s ease;
+    }
+
+    .login-submit:hover {
+      filter: brightness(1.04);
+      transform: translateY(-1px);
+    }
+
+    .login-submit:disabled {
+      cursor: not-allowed;
+      opacity: 0.7;
+      filter: grayscale(0.1);
+      transform: none;
+    }
+
+    .login-meta {
+      margin-top: 14px;
+      display: flex;
+      justify-content: space-between;
+      gap: 10px;
+      align-items: center;
+      flex-wrap: wrap;
+      color: #9ab7cd;
+      font-size: clamp(0.92rem, 1vw, 0.98rem);
+      font-weight: 500;
+    }
+
+    .login-meta a {
+      color: #ace5ff;
+      text-decoration: none;
+      font-weight: 700;
+    }
+
+    .login-meta a:hover {
+      text-decoration: underline;
+    }
+
+    @media (max-width: 720px) {
+      .login-card {
+        border-radius: 24px;
+        padding: 22px 20px;
+      }
+
+      .login-brand {
+        gap: 12px;
+      }
+
+      .brand-avatar {
+        width: 56px;
+        height: 56px;
+      }
+
+      .brand-avatar::before,
+      .brand-avatar::after {
+        width: 8px;
+        height: 8px;
+        top: 20px;
+      }
+
+      .brand-avatar::before {
+        left: 14px;
+      }
+
+      .brand-avatar::after {
+        right: 14px;
+      }
+
+      .login-meta {
+        justify-content: flex-start;
+      }
+    }
+  </style>
+  <script>window.learningToolsRuntime = window.learningToolsRuntime || {};</script>
+</head>
+<body class="app-body login-page">
+<main class="login-card">
+  <div class="login-brand">
+    <div class="brand-avatar" aria-hidden="true"></div>
+    <div>
+      <h2>VerifAI</h2>
+      <p>Continue to your role-based dashboard</p>
+    </div>
+  </div>
+  <p id="login-error" class="login-error" style="display:none"></p>
+  <form id="login-form" autocomplete="off">
+    <div class="login-field">
+      <label for="username">Username</label>
+      <input id="username" type="text" name="username" placeholder="Enter your username" required>
+    </div>
+    <div class="login-field">
+      <label for="password">Password</label>
+      <input id="password" type="password" name="password" placeholder="Enter your password" required>
+    </div>
+    <button id="btn-login" class="login-submit" type="submit">Access Dashboard</button>
+  </form>
+  <div class="login-meta">
+    <span>Protected by role and session controls.</span>
+    <a href="/">Back to home</a>
+  </div>
+</main>
+<script>
+  const form = document.getElementById("login-form");
+  const loginError = document.getElementById("login-error");
+  const btnLogin = document.getElementById("btn-login");
+
+  function showError(message) {
+    loginError.textContent = message;
+    loginError.style.display = "block";
+  }
+
+  function roleLanding(role) {
+    if (role === "super_admin") return "/qc/super_admin/dashboard";
+    if (role === "doctor") return "/qc/doctor/dashboard";
+    if (role === "auditor") return "/qc/auditor/dashboard";
+    return "/qc/user/dashboard";
+  }
+
+  async function login(username, password) {
+    const resp = await fetch("/api/v1/auth/login", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ username, password })
+    });
+    const text = await resp.text();
+    let body = null;
+    try { body = text ? JSON.parse(text) : null; } catch (e) { body = { detail: text }; }
+    if (!resp.ok) {
+      throw new Error((body && body.detail) ? body.detail : `Login failed (${resp.status})`);
+    }
+    return body;
+  }
+
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    loginError.style.display = "none";
+    btnLogin.disabled = true;
+
+    const username = (document.getElementById("username").value || "").trim();
+    const password = document.getElementById("password").value || "";
+
+    try {
+      const result = await login(username, password);
+      localStorage.setItem("qc_access_token", result.access_token);
+      localStorage.setItem("qc_user", JSON.stringify(result.user));
+      localStorage.setItem("qc_acting_role", result.user.role);
+      window.location.href = roleLanding(result.user.role);
+    } catch (err) {
+      showError(err.message || "Invalid credentials.");
+    } finally {
+      btnLogin.disabled = false;
+    }
+  });
+</script>
+</body>
+</html>
+
+
+
+
+
+
+

@@ -1,0 +1,12 @@
+{
+  "total_rows": 1492,
+  "candidate_updates": 0,
+  "name_updates": 0,
+  "component_updates": 0,
+  "backup_table": "medicine_component_lookup_backup_20260608_013417",
+  "mode": "apply",
+  "stats": {
+    "no_match": 1492
+  },
+  "sample_updates": []
+}

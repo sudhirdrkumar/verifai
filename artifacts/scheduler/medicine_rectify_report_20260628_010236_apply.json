@@ -1,0 +1,61 @@
+{
+  "total_rows": 1492,
+  "candidate_updates": 5,
+  "name_updates": 5,
+  "component_updates": 0,
+  "backup_table": "medicine_component_lookup_backup_20260628_011551",
+  "mode": "apply",
+  "stats": {
+    "low_confidence": 274,
+    "already_good": 59,
+    "no_match": 1154,
+    "name_updated": 5
+  },
+  "sample_updates": [
+    {
+      "id": 43,
+      "old_name": "AMIKACIN 250mg",
+      "new_name": "amikacin 250 MG/ML",
+      "old_components": "amikacin",
+      "new_components": "amikacin",
+      "score": 0.9393,
+      "reason": "name_updated"
+    },
+    {
+      "id": 79,
+      "old_name": "Ampicillin 250 mg vial",
+      "new_name": "ampicillin 250 MG",
+      "old_components": "ampicillin + ampicillin / floxacillin",
+      "new_components": "ampicillin + ampicillin / floxacillin",
+      "score": 0.85,
+      "reason": "name_updated"
+    },
+    {
+      "id": 135,
+      "old_name": "AZITHROMYCIN 500 MG OD",
+      "new_name": "azithromycin 500 MG",
+      "old_components": "azithromycin",
+      "new_components": "azithromycin",
+      "score": 0.9028,
+      "reason": "name_updated"
+    },
+    {
+      "id": 263,
+      "old_name": "Ceftriaxone 1gm injection",
+      "new_name": "ceftriaxone Injection",
+      "old_components": "ceftriaxone",
+      "new_components": "ceftriaxone",
+      "score": 0.8907,
+      "reason": "name_updated"
+    },
+    {
+      "id": 284,
+      "old_name": "Cefuroxime 500 mg BD",
+      "new_name": "cefuroxime 500 MG",
+      "old_components": "cefuroxime",
+      "new_components": "cefuroxime",
+      "score": 0.8969,
+      "reason": "name_updated"
+    }
+  ]
+}
