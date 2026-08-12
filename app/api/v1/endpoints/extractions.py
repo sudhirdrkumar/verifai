@@ -12,6 +12,7 @@ from app.services.auth_service import AuthenticatedUser
 from app.services.extraction_providers import ExtractionConfigError, ExtractionProcessingError
 from app.services.extractions_service import DocumentNotFoundError, list_document_extractions, run_document_extraction, run_document_extraction_releasing_db
 from app.services.storage_service import StorageConfigError, StorageOperationError
+from app.utils.db_utils import get_db_context
 
 router = APIRouter(tags=["extractions"])
 
@@ -50,16 +51,16 @@ def list_document_extractions_endpoint(
     document_id: UUID,
     limit: int = Query(default=50, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
-    db: Session = Depends(get_db),
     current_user: AuthenticatedUser = Depends(require_roles(UserRole.super_admin, UserRole.user, UserRole.doctor)),
 ) -> ExtractionListResponse:
-    if current_user.role == UserRole.doctor:
-        allowed = doctor_can_access_document(db, document_id, current_user.username)
-        if allowed is False:
-            raise HTTPException(status_code=403, detail="doctor can access only assigned claim documents")
+    with get_db_context() as db:
+        if current_user.role == UserRole.doctor:
+            allowed = doctor_can_access_document(db, document_id, current_user.username)
+            if allowed is False:
+                raise HTTPException(status_code=403, detail="doctor can access only assigned claim documents")
 
-    try:
-        return list_document_extractions(db, document_id, limit, offset)
-    except DocumentNotFoundError as exc:
-        raise HTTPException(status_code=404, detail="document not found") from exc
+        try:
+            return list_document_extractions(db, document_id, limit, offset)
+        except DocumentNotFoundError as exc:
+            raise HTTPException(status_code=404, detail="document not found") from exc
 
