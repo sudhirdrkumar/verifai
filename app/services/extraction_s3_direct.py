@@ -150,7 +150,7 @@ def _call_openai_with_s3_url(
     }
 
     payload = {
-        "model": "gpt-4-vision",
+        "model": "gpt-4o-mini",
         "messages": [
             {
                 "role": "user",
@@ -175,7 +175,7 @@ def _call_openai_with_s3_url(
 
         return {
             "provider": "openai-s3-direct",
-            "model_name": "gpt-4-vision",
+            "model_name": "gpt-4o-mini",
             "extraction_version": "openai-v2-s3-direct",
             "extracted_entities": _parse_json_entities(model_output),
             "evidence_refs": [],
