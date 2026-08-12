@@ -1337,6 +1337,16 @@ def save_claim_report_html_endpoint(
     if len(report_html) > 2_000_000:
         raise HTTPException(status_code=413, detail="report_html too large")
 
+    # TODO: Grammar check disabled temporarily for performance. Re-enable with async processing.
+    # try:
+    #     grammar_result = grammar_check_report_html(report_html)
+    #     report_html = grammar_result.get("corrected_html", report_html)
+    #     logger.info(f"Grammar check applied: {grammar_result.get('checked_segments', 0)} segments checked, {grammar_result.get('corrected_segments', 0)} corrected")
+    # except GrammarCheckError as exc:
+    #     logger.warning(f"Grammar check failed, continuing with uncorrected report: {exc}")
+    # except Exception as exc:
+    #     logger.warning(f"Unexpected error during grammar check: {exc}")
+
     report_status = (payload.report_status or "draft").strip().lower() or "draft"
     allowed_status = {"draft", "completed", "uploaded", "final"}
     if report_status not in allowed_status:

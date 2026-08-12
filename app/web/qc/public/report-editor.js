@@ -846,25 +846,43 @@
     container.innerHTML = '<div style="padding: 20px; text-align: center; color: #999;">⏳ Generating conclusion...</div>';
 
     try {
-      const response = await fetch('/api/v1/phase5/generate-conclusion', {
+      // Fetch claim details for ML generation
+      let claimData = {
+        claim_id: params.claimId,
+        chief_complaint: 'Not provided',
+        symptoms: 'Not provided',
+        diagnosis: 'Not provided',
+        treatment_given: 'Not provided',
+        investigations: {},
+        admission_date: new Date().toISOString().split('T')[0],
+        discharge_date: new Date().toISOString().split('T')[0],
+        los_days: 1,
+        claim_amount: 100000
+      };
+
+      if (params.claimUuid) {
+        try {
+          const claimResp = await apiFetch('/api/v1/claims/' + encodeURIComponent(params.claimUuid));
+          if (claimResp && claimResp.claim) {
+            const claim = claimResp.claim;
+            claimData.chief_complaint = claim.chief_complaint || claimData.chief_complaint;
+            claimData.diagnosis = claim.diagnosis || claimData.diagnosis;
+            claimData.treatment_given = claim.treatment_given || claimData.treatment_given;
+            claimData.claim_amount = claim.amount || claimData.claim_amount;
+          }
+        } catch (_) {
+          // Use default data if fetch fails
+        }
+      }
+
+      const data = await apiFetch('/api/v1/phase5/generate-conclusion', {
         method: 'POST',
-        headers: {
-          'Authorization': 'Bearer ' + token,
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({
-          claim_id: params.claimId,
-          patient_name: 'Patient',
-          diagnosis: 'Diagnosis',
-          treatment_given: 'Treatment',
-          claim_amount: 100000
-        })
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(claimData)
       });
 
-      const data = await response.json();
-
       if (!data.success || !data.data) {
-        throw new Error(data.detail || 'Failed to generate');
+        throw new Error(data.detail || data.error || 'Failed to generate');
       }
 
       phase5Data = data.data;

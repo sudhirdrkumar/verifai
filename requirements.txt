@@ -16,3 +16,4 @@ Pillow==11.2.1
 
 language-tool-python==2.9.4
 openpyxl==3.1.5
+openai>=1.0.0
