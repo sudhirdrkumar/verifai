@@ -575,14 +575,18 @@ def run_s3_openai_pipeline(
 ) -> dict[str, Any]:
     """
     Phase 2 — No DB: Extract from S3.
-    For OpenAI/auto provider: Use S3-direct extraction (presigned URL, no EC2 download)
-    For other providers: Download and extract locally
+    Hybrid approach:
+    - IMAGES: Use S3-direct extraction (presigned URL, no EC2 download)
+    - PDFs: Use local extraction (works reliably with OpenAI)
     """
     from app.services.extraction_s3_direct import extract_via_s3_presigned_url, S3DirectExtractionError
 
-    # Use S3-direct for OpenAI and auto providers to avoid timeout on large files
-    if provider in (ExtractionProvider.openai, ExtractionProvider.auto):
-        logger.info(f"Using S3-direct extraction for {file_name} with provider={provider.value}")
+    safe_mime = str(mime_type or "application/pdf").strip().lower()
+    is_image = safe_mime.startswith("image/")
+
+    # Use S3-direct only for IMAGES to avoid EC2 memory overhead
+    if is_image and provider in (ExtractionProvider.openai, ExtractionProvider.auto):
+        logger.info(f"Using S3-direct extraction for image {file_name} with provider={provider.value}")
         try:
             return extract_via_s3_presigned_url(
                 s3_bucket=s3_bucket or settings.s3_bucket,
@@ -594,8 +598,9 @@ def run_s3_openai_pipeline(
             logger.warning(f"S3-direct extraction failed: {e}. Falling back to local extraction for {file_name}")
             # Fall through to local extraction only if S3-direct fails
 
-    # Local extraction for non-OpenAI providers or S3-direct fallback
-    logger.info(f"Using local extraction for {file_name} with provider={provider.value}")
+    # Local extraction for PDFs and non-OpenAI providers
+    # (PDFs extract reliably with local processing)
+    logger.info(f"Using local extraction for {file_name} with provider={provider.value} (mime_type={safe_mime})")
     file_bytes = download_bytes(storage_key)
     return run_extraction(
         provider=provider,
