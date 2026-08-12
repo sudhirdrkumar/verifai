@@ -7,9 +7,15 @@ from fastapi.staticfiles import StaticFiles
 from app.api.router import api_router
 from app.core.config import settings
 from app.db.migrations import run_pending_migrations
+from app.middleware.request_monitoring import RequestMonitoringMiddleware, TransactionGuardMiddleware
 from app.services.medicine_rectify_scheduler import medicine_rectify_scheduler
 
 app = FastAPI(title=settings.app_name)
+
+# Add monitoring middleware (must be added before routers)
+app.add_middleware(TransactionGuardMiddleware)
+app.add_middleware(RequestMonitoringMiddleware)
+
 app.include_router(api_router, prefix=settings.api_v1_prefix)
 
 WEB_ROOT = Path(__file__).resolve().parent / "web"
