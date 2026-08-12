@@ -5,10 +5,12 @@ import re
 from typing import Any
 from uuid import UUID, uuid4
 
+import boto3
 from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
+from app.core.config import settings
 from app.db.session import SessionLocal
 from app.schemas.extraction import (
     ExtractionListResponse,
@@ -571,7 +573,42 @@ def run_s3_openai_pipeline(
     provider: ExtractionProvider,
     s3_bucket: str | None = None,
 ) -> dict[str, Any]:
-    """Phase 2 — No DB: download from S3 then run OpenAI extraction. Pure data transformation."""
+    """
+    Phase 2 — No DB: Extract from S3.
+    For large files (>5MB): Use S3-direct OpenAI (no download to EC2)
+    For small files: Download and extract locally
+    """
+    from app.services.extraction_s3_direct import extract_via_s3_presigned_url, S3DirectExtractionError
+
+    # Get file size to determine extraction method
+    try:
+        import boto3
+        s3 = boto3.client("s3", region_name=settings.s3_region)
+        head_response = s3.head_object(Bucket=s3_bucket or settings.s3_bucket, Key=storage_key)
+        file_size_mb = head_response['ContentLength'] / (1024 * 1024)
+
+        # For large files (>5MB) or PDFs that are slow to process, use S3-direct
+        is_pdf = mime_type.lower() == 'application/pdf' or file_name.lower().endswith('.pdf')
+        should_use_s3_direct = file_size_mb > 5 or (is_pdf and file_size_mb > 2)
+
+        if should_use_s3_direct and provider in (ExtractionProvider.openai, ExtractionProvider.auto):
+            logger.info(f"Using S3-direct extraction for large file {file_name} ({file_size_mb:.1f}MB)")
+            try:
+                return extract_via_s3_presigned_url(
+                    s3_bucket=s3_bucket or settings.s3_bucket,
+                    storage_key=storage_key,
+                    document_name=file_name,
+                    mime_type=mime_type,
+                )
+            except S3DirectExtractionError as e:
+                logger.warning(f"S3-direct extraction failed, falling back to local: {e}")
+                # Fall through to local extraction
+
+    except Exception as e:
+        logger.warning(f"Could not determine file size, using local extraction: {e}")
+        # Fall through to local extraction
+
+    # Local extraction for small files
     file_bytes = download_bytes(storage_key)
     return run_extraction(
         provider=provider,
