@@ -1,6 +1,7 @@
 import base64
 import io
 import json
+import logging
 import math
 import re
 import time
@@ -13,6 +14,13 @@ from pypdf import PdfReader
 
 from app.core.config import settings
 from app.schemas.extraction import ExtractionProvider
+
+logger = logging.getLogger(__name__)
+
+# Timeout configuration for external APIs (seconds)
+OPENAI_API_TIMEOUT = 120  # 2 minutes max for OpenAI API calls
+OCR_API_TIMEOUT = 90
+PDF_SIZE_WARNING_MB = 50  # Warn and use streaming for PDFs larger than this
 
 
 class ExtractionConfigError(Exception):
