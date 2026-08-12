@@ -575,40 +575,27 @@ def run_s3_openai_pipeline(
 ) -> dict[str, Any]:
     """
     Phase 2 — No DB: Extract from S3.
-    For large files (>5MB): Use S3-direct OpenAI (no download to EC2)
-    For small files: Download and extract locally
+    For OpenAI/auto provider: Use S3-direct extraction (presigned URL, no EC2 download)
+    For other providers: Download and extract locally
     """
     from app.services.extraction_s3_direct import extract_via_s3_presigned_url, S3DirectExtractionError
 
-    # Get file size to determine extraction method
-    try:
-        import boto3
-        s3 = boto3.client("s3", region_name=settings.s3_region)
-        head_response = s3.head_object(Bucket=s3_bucket or settings.s3_bucket, Key=storage_key)
-        file_size_mb = head_response['ContentLength'] / (1024 * 1024)
+    # Use S3-direct for OpenAI and auto providers to avoid timeout on large files
+    if provider in (ExtractionProvider.openai, ExtractionProvider.auto):
+        logger.info(f"Using S3-direct extraction for {file_name} with provider={provider.value}")
+        try:
+            return extract_via_s3_presigned_url(
+                s3_bucket=s3_bucket or settings.s3_bucket,
+                storage_key=storage_key,
+                document_name=file_name,
+                mime_type=mime_type,
+            )
+        except S3DirectExtractionError as e:
+            logger.warning(f"S3-direct extraction failed: {e}. Falling back to local extraction for {file_name}")
+            # Fall through to local extraction only if S3-direct fails
 
-        # For large files (>5MB) or PDFs that are slow to process, use S3-direct
-        is_pdf = mime_type.lower() == 'application/pdf' or file_name.lower().endswith('.pdf')
-        should_use_s3_direct = file_size_mb > 5 or (is_pdf and file_size_mb > 2)
-
-        if should_use_s3_direct and provider in (ExtractionProvider.openai, ExtractionProvider.auto):
-            logger.info(f"Using S3-direct extraction for large file {file_name} ({file_size_mb:.1f}MB)")
-            try:
-                return extract_via_s3_presigned_url(
-                    s3_bucket=s3_bucket or settings.s3_bucket,
-                    storage_key=storage_key,
-                    document_name=file_name,
-                    mime_type=mime_type,
-                )
-            except S3DirectExtractionError as e:
-                logger.warning(f"S3-direct extraction failed, falling back to local: {e}")
-                # Fall through to local extraction
-
-    except Exception as e:
-        logger.warning(f"Could not determine file size, using local extraction: {e}")
-        # Fall through to local extraction
-
-    # Local extraction for small files
+    # Local extraction for non-OpenAI providers or S3-direct fallback
+    logger.info(f"Using local extraction for {file_name} with provider={provider.value}")
     file_bytes = download_bytes(storage_key)
     return run_extraction(
         provider=provider,
