@@ -38,6 +38,7 @@ from app.services.ml_claim_model import (
 )
 from app.services.sql_dump_parser import iter_table_rows_from_sql_dump_bytes
 from app.services.access_control import doctor_matches_assignment
+from app.utils.db_utils import get_db_context
 
 router = APIRouter(prefix="/user-tools", tags=["user-tools"])
 
@@ -927,275 +928,275 @@ def completed_reports(
     sort_order: str = Query(default="updated_desc"),
     limit: int = Query(default=200, ge=1, le=500),
     offset: int = Query(default=0, ge=0),
-    db: Session = Depends(get_db),
     current_user: AuthenticatedUser = Depends(require_roles(UserRole.super_admin, UserRole.user, UserRole.auditor, UserRole.doctor)),
 ) -> dict:
-    _ensure_claim_report_uploads_table(db)
+    with get_db_context() as db:
+        _ensure_claim_report_uploads_table(db)
 
-    _ensure_claim_legacy_data_table(db)
+        _ensure_claim_legacy_data_table(db)
 
-    normalized_status = status_filter if status_filter in {"pending", "uploaded", "all"} else "pending"
-    normalized_qc = "all" if str(qc_filter or "").strip().lower() == "all" else (_normalize_qc_status(qc_filter) or "no")
-    normalized_sort = str(sort_order or "updated_desc").strip().lower()
-    if normalized_sort not in {"updated_desc", "allotment_asc"}:
-        normalized_sort = "updated_desc"
+        normalized_status = status_filter if status_filter in {"pending", "uploaded", "all"} else "pending"
+        normalized_qc = "all" if str(qc_filter or "").strip().lower() == "all" else (_normalize_qc_status(qc_filter) or "no")
+        normalized_sort = str(sort_order or "updated_desc").strip().lower()
+        if normalized_sort not in {"updated_desc", "allotment_asc"}:
+            normalized_sort = "updated_desc"
 
-    system_report_expr_latest = _system_report_sql("rv.created_by")
-    system_report_expr_stats = _system_report_sql("created_by")
-    allotment_date_expr = (
-        "COALESCE(la.allotment_date, "
-        "CASE "
-        "WHEN NULLIF(TRIM(COALESCE(ldata.legacy_payload->>'allocation_date', '')), '') ~ '^\d{4}-\d{2}-\d{2}$' "
-        "THEN TO_DATE(NULLIF(TRIM(COALESCE(ldata.legacy_payload->>'allocation_date', '')), ''), 'YYYY-MM-DD') "
-        "WHEN NULLIF(TRIM(COALESCE(ldata.legacy_payload->>'allocation_date', '')), '') ~ '^\d{2}-\d{2}-\d{4}$' "
-        "THEN TO_DATE(NULLIF(TRIM(COALESCE(ldata.legacy_payload->>'allocation_date', '')), ''), 'DD-MM-YYYY') "
-        "WHEN NULLIF(TRIM(COALESCE(ldata.legacy_payload->>'allocation_date', '')), '') ~ '^\d{2}/\d{2}/\d{4}$' "
-        "THEN TO_DATE(NULLIF(TRIM(COALESCE(ldata.legacy_payload->>'allocation_date', '')), ''), 'DD/MM/YYYY') "
-        "ELSE NULL END)"
-    )
-    if normalized_sort == "allotment_asc":
-        order_by_sql = f"CASE WHEN {allotment_date_expr} IS NULL THEN 1 ELSE 0 END ASC, {allotment_date_expr} ASC, c.updated_at ASC"
-    else:
-        order_by_sql = "c.updated_at DESC"
-
-
-    filters: list[str] = ["c.status = 'completed'"]
-    params: dict[str, Any] = {"limit": limit, "offset": offset}
-
-    if search_claim and search_claim.strip():
-        filters.append("LOWER(c.external_claim_id) LIKE :search_claim")
-        params["search_claim"] = f"%{search_claim.strip().lower()}%"
-
-    if _is_valid_date(allotment_date):
-        filters.append(f"{allotment_date_expr} = :allotment_date")
-        params["allotment_date"] = allotment_date
-
-    doctors = _split_doctor_filter(doctor_filter)
-    if doctors:
-        doctor_clauses: list[str] = []
-        for idx, doctor in enumerate(doctors):
-            key = f"doctor_{idx}"
-            params[key] = doctor
-            doctor_clauses.append(
-                f":{key} = ANY(string_to_array(regexp_replace(LOWER(COALESCE(c.assigned_doctor_id, '')), '[^a-z0-9,]+', '', 'g'), ','))"
-            )
-        filters.append("(" + " OR ".join(doctor_clauses) + ")")
-
-    effective_status_expr = """CASE
-        WHEN NULLIF(TRIM(COALESCE(um.tagging, '')), '') IS NOT NULL
-             OR NULLIF(TRIM(COALESCE(um.subtagging, '')), '') IS NOT NULL
-             OR NULLIF(TRIM(COALESCE(um.opinion, '')), '') IS NOT NULL
-        THEN 'uploaded'
-        WHEN COALESCE(um.report_export_status, 'pending') = 'uploaded'
-        THEN 'uploaded'
-        WHEN COALESCE(rv.export_uri, '') <> ''
-        THEN 'uploaded'
-        ELSE 'pending'
-    END"""
-
-    where_sql = "WHERE " + " AND ".join(filters)
-    status_where = ""
-    if normalized_status != "all":
-        status_where = f" AND {effective_status_expr} = :status_filter"
-        params["status_filter"] = normalized_status
-
-    qc_where = ""
-    qc_expr = "CASE WHEN LOWER(REPLACE(REPLACE(COALESCE(um.qc_status, 'no'), ' ', '_'), '-', '_')) IN ('yes', 'qc_yes', 'qcyes', 'qc_done', 'done') THEN 'yes' ELSE 'no' END"
-    if normalized_qc != "all":
-        qc_where = f" AND {qc_expr} = :qc_filter"
-        params["qc_filter"] = normalized_qc
-
-    tagged_where = ""
-    if exclude_tagged:
-        tagged_where = " AND NULLIF(TRIM(COALESCE(um.tagging, '')), '') IS NULL"
-
-    total = db.execute(
-        text(
-            f"""
-            WITH latest_report AS (
-                SELECT DISTINCT ON (claim_id)
-                    claim_id, report_status, report_markdown, export_uri, version_no, created_at, created_by
-                FROM report_versions
-                ORDER BY claim_id, version_no DESC
-            ),
-            latest_assignment AS (
-                SELECT DISTINCT ON (claim_id)
-                    claim_id,
-                    DATE(occurred_at) AS allotment_date
-                FROM workflow_events
-                WHERE event_type = 'claim_assigned'
-                ORDER BY claim_id, occurred_at DESC
-            ),
-            upload_meta AS (
-                SELECT
-                    claim_id,
-                    report_export_status,
-                    tagging,
-                    subtagging,
-                    opinion,
-                    qc_status,
-                    auditor_rating,
-                    auditor_rating_by,
-                    auditor_rating_at,
-                    updated_at
-                FROM claim_report_uploads
-            ),
-            legacy_data AS (
-                SELECT claim_id, legacy_payload
-                FROM claim_legacy_data
-            )
-            SELECT COUNT(*)
-            FROM claims c
-            LEFT JOIN latest_report rv ON rv.claim_id = c.id
-            LEFT JOIN latest_assignment la ON la.claim_id = c.id
-            LEFT JOIN upload_meta um ON um.claim_id = c.id
-            LEFT JOIN legacy_data ldata ON ldata.claim_id = c.id
-            {where_sql}
-            {status_where}
-            {qc_where}
-            {tagged_where}
-            """
-        ),
-        params,
-    ).scalar_one()
-
-    rows = db.execute(
-        text(
-            f"""
-            WITH latest_report AS (
-                SELECT DISTINCT ON (claim_id)
-                    claim_id, report_status, report_markdown, export_uri, version_no, created_at, created_by
-                FROM report_versions
-                ORDER BY claim_id, version_no DESC
-            ),
-            latest_assignment AS (
-                SELECT DISTINCT ON (claim_id)
-                    claim_id,
-                    DATE(occurred_at) AS allotment_date
-                FROM workflow_events
-                WHERE event_type = 'claim_assigned'
-                ORDER BY claim_id, occurred_at DESC
-            ),
-            report_counts AS (
-                SELECT claim_id, COUNT(*) AS report_count
-                FROM report_versions
-                GROUP BY claim_id
-            ),
-            report_source_stats AS (
-                SELECT
-                    claim_id,
-                    MAX(CASE WHEN {system_report_expr_stats} THEN 1 ELSE 0 END) AS has_system_html,
-                    MAX(CASE WHEN NOT ({system_report_expr_stats}) THEN 1 ELSE 0 END) AS has_doctor_html
-                FROM report_versions
-                WHERE NULLIF(TRIM(COALESCE(report_markdown, '')), '') IS NOT NULL
-                GROUP BY claim_id
-            ),
-            upload_meta AS (
-                SELECT
-                    claim_id,
-                    report_export_status,
-                    tagging,
-                    subtagging,
-                    opinion,
-                    qc_status,
-                    auditor_rating,
-                    auditor_rating_by,
-                    auditor_rating_at,
-                    updated_at
-                FROM claim_report_uploads
-            ),
-            legacy_data AS (
-                SELECT claim_id, legacy_payload
-                FROM claim_legacy_data
-            )
-            SELECT
-                c.id,
-                c.external_claim_id,
-                c.patient_name,
-                c.assigned_doctor_id,
-                c.updated_at,
-                c.updated_at AS completed_at,
-                {allotment_date_expr} AS allotment_date,
-                COALESCE(rv.report_status, 'pending') AS report_status,
-                COALESCE(rv.export_uri, '') AS export_uri,
-                rv.created_at AS report_created_at,
-                COALESCE(rv.version_no, 0) AS report_version,
-                CASE WHEN NULLIF(TRIM(COALESCE(rv.report_markdown, '')), '') IS NULL THEN FALSE ELSE TRUE END AS report_html_available,
-                CASE WHEN {system_report_expr_latest} THEN 'system' ELSE 'doctor' END AS latest_report_source,
-                CASE WHEN COALESCE(rss.has_doctor_html, 0) = 1 THEN TRUE ELSE FALSE END AS doctor_report_html_available,
-                CASE WHEN COALESCE(rss.has_system_html, 0) = 1 THEN TRUE ELSE FALSE END AS system_report_html_available,
-                COALESCE(um.report_export_status, 'pending') AS stored_report_export_status,
-                COALESCE(um.tagging, '') AS tagging,
-                COALESCE(um.subtagging, '') AS subtagging,
-                COALESCE(um.opinion, '') AS opinion,
-                CASE WHEN LOWER(REPLACE(REPLACE(COALESCE(um.qc_status, 'no'), ' ', '_'), '-', '_')) IN ('yes', 'qc_yes', 'qcyes', 'qc_done', 'done') THEN 'yes' ELSE 'no' END AS qc_status,
-                CASE
-                    WHEN COALESCE(um.auditor_rating, 0) BETWEEN 1 AND 5 THEN um.auditor_rating
-                    ELSE 0
-                END AS auditor_rating,
-                COALESCE(um.auditor_rating_by, '') AS auditor_rating_by,
-                um.auditor_rating_at AS auditor_rating_at,
-                um.updated_at AS upload_updated_at,
-                COALESCE(rc.report_count, 0) AS report_count,
-                {effective_status_expr} AS effective_report_status
-            FROM claims c
-            LEFT JOIN latest_report rv ON rv.claim_id = c.id
-            LEFT JOIN latest_assignment la ON la.claim_id = c.id
-            LEFT JOIN report_counts rc ON rc.claim_id = c.id
-            LEFT JOIN report_source_stats rss ON rss.claim_id = c.id
-            LEFT JOIN upload_meta um ON um.claim_id = c.id
-            LEFT JOIN legacy_data ldata ON ldata.claim_id = c.id
-            {where_sql}
-            {status_where}
-            {qc_where}
-            {tagged_where}
-            ORDER BY {order_by_sql}
-            LIMIT :limit OFFSET :offset
-            """
-        ),
-        params,
-    ).mappings().all()
-
-    items = []
-    for row in rows:
-        export_uri = str(row.get("export_uri") or "")
-        effective_status = str(row.get("effective_report_status") or "pending")
-        items.append(
-            {
-                "claim_uuid": str(row["id"]),
-                "external_claim_id": str(row["external_claim_id"]),
-                "patient_name": str(row.get("patient_name") or ""),
-                "assigned_doctor_id": str(row.get("assigned_doctor_id") or ""),
-                "report_status": effective_status,
-                "effective_report_status": effective_status,
-                "report_uploaded": effective_status == "uploaded" or bool(export_uri),
-                "export_uri": export_uri,
-                "updated_at": row.get("updated_at"),
-                "completed_at": row.get("completed_at"),
-                "allotment_date": row.get("allotment_date"),
-                "report_created_at": row.get("report_created_at"),
-                "report_version": int(row.get("report_version") or 0),
-                "report_html_available": bool(row.get("report_html_available") or False),
-                "latest_report_source": str(row.get("latest_report_source") or "doctor"),
-                "doctor_report_html_available": bool(row.get("doctor_report_html_available") or False),
-                "system_report_html_available": bool(row.get("system_report_html_available") or False),
-                "report_count": int(row.get("report_count") or 0),
-                "tagging": _normalize_optional_text(row.get("tagging")),
-                "subtagging": _normalize_optional_text(row.get("subtagging")),
-                "opinion": _normalize_optional_text(row.get("opinion")),
-                "qc_status": str(row.get("qc_status") or "no"),
-                "auditor_rating": int(row.get("auditor_rating") or 0),
-                "auditor_rating_by": str(row.get("auditor_rating_by") or ""),
-                "auditor_rating_at": row.get("auditor_rating_at"),
-                "upload_updated_at": row.get("upload_updated_at"),
-            }
+        system_report_expr_latest = _system_report_sql("rv.created_by")
+        system_report_expr_stats = _system_report_sql("created_by")
+        allotment_date_expr = (
+            "COALESCE(la.allotment_date, "
+            "CASE "
+            "WHEN NULLIF(TRIM(COALESCE(ldata.legacy_payload->>'allocation_date', '')), '') ~ '^\d{4}-\d{2}-\d{2}$' "
+            "THEN TO_DATE(NULLIF(TRIM(COALESCE(ldata.legacy_payload->>'allocation_date', '')), ''), 'YYYY-MM-DD') "
+            "WHEN NULLIF(TRIM(COALESCE(ldata.legacy_payload->>'allocation_date', '')), '') ~ '^\d{2}-\d{2}-\d{4}$' "
+            "THEN TO_DATE(NULLIF(TRIM(COALESCE(ldata.legacy_payload->>'allocation_date', '')), ''), 'DD-MM-YYYY') "
+            "WHEN NULLIF(TRIM(COALESCE(ldata.legacy_payload->>'allocation_date', '')), '') ~ '^\d{2}/\d{2}/\d{4}$' "
+            "THEN TO_DATE(NULLIF(TRIM(COALESCE(ldata.legacy_payload->>'allocation_date', '')), ''), 'DD/MM/YYYY') "
+            "ELSE NULL END)"
         )
+        if normalized_sort == "allotment_asc":
+            order_by_sql = f"CASE WHEN {allotment_date_expr} IS NULL THEN 1 ELSE 0 END ASC, {allotment_date_expr} ASC, c.updated_at ASC"
+        else:
+            order_by_sql = "c.updated_at DESC"
 
-    return {
-        "total": int(total or 0),
-        "items": items,
-        "tagging_subtagging_options": TAGGING_SUBTAGGING_OPTIONS,
-    }
+
+        filters: list[str] = ["c.status = 'completed'"]
+        params: dict[str, Any] = {"limit": limit, "offset": offset}
+
+        if search_claim and search_claim.strip():
+            filters.append("LOWER(c.external_claim_id) LIKE :search_claim")
+            params["search_claim"] = f"%{search_claim.strip().lower()}%"
+
+        if _is_valid_date(allotment_date):
+            filters.append(f"{allotment_date_expr} = :allotment_date")
+            params["allotment_date"] = allotment_date
+
+        doctors = _split_doctor_filter(doctor_filter)
+        if doctors:
+            doctor_clauses: list[str] = []
+            for idx, doctor in enumerate(doctors):
+                key = f"doctor_{idx}"
+                params[key] = doctor
+                doctor_clauses.append(
+                    f":{key} = ANY(string_to_array(regexp_replace(LOWER(COALESCE(c.assigned_doctor_id, '')), '[^a-z0-9,]+', '', 'g'), ','))"
+                )
+            filters.append("(" + " OR ".join(doctor_clauses) + ")")
+
+        effective_status_expr = """CASE
+            WHEN NULLIF(TRIM(COALESCE(um.tagging, '')), '') IS NOT NULL
+                 OR NULLIF(TRIM(COALESCE(um.subtagging, '')), '') IS NOT NULL
+                 OR NULLIF(TRIM(COALESCE(um.opinion, '')), '') IS NOT NULL
+            THEN 'uploaded'
+            WHEN COALESCE(um.report_export_status, 'pending') = 'uploaded'
+            THEN 'uploaded'
+            WHEN COALESCE(rv.export_uri, '') <> ''
+            THEN 'uploaded'
+            ELSE 'pending'
+        END"""
+
+        where_sql = "WHERE " + " AND ".join(filters)
+        status_where = ""
+        if normalized_status != "all":
+            status_where = f" AND {effective_status_expr} = :status_filter"
+            params["status_filter"] = normalized_status
+
+        qc_where = ""
+        qc_expr = "CASE WHEN LOWER(REPLACE(REPLACE(COALESCE(um.qc_status, 'no'), ' ', '_'), '-', '_')) IN ('yes', 'qc_yes', 'qcyes', 'qc_done', 'done') THEN 'yes' ELSE 'no' END"
+        if normalized_qc != "all":
+            qc_where = f" AND {qc_expr} = :qc_filter"
+            params["qc_filter"] = normalized_qc
+
+        tagged_where = ""
+        if exclude_tagged:
+            tagged_where = " AND NULLIF(TRIM(COALESCE(um.tagging, '')), '') IS NULL"
+
+        total = db.execute(
+            text(
+                f"""
+                WITH latest_report AS (
+                    SELECT DISTINCT ON (claim_id)
+                        claim_id, report_status, report_markdown, export_uri, version_no, created_at, created_by
+                    FROM report_versions
+                    ORDER BY claim_id, version_no DESC
+                ),
+                latest_assignment AS (
+                    SELECT DISTINCT ON (claim_id)
+                        claim_id,
+                        DATE(occurred_at) AS allotment_date
+                    FROM workflow_events
+                    WHERE event_type = 'claim_assigned'
+                    ORDER BY claim_id, occurred_at DESC
+                ),
+                upload_meta AS (
+                    SELECT
+                        claim_id,
+                        report_export_status,
+                        tagging,
+                        subtagging,
+                        opinion,
+                        qc_status,
+                        auditor_rating,
+                        auditor_rating_by,
+                        auditor_rating_at,
+                        updated_at
+                    FROM claim_report_uploads
+                ),
+                legacy_data AS (
+                    SELECT claim_id, legacy_payload
+                    FROM claim_legacy_data
+                )
+                SELECT COUNT(*)
+                FROM claims c
+                LEFT JOIN latest_report rv ON rv.claim_id = c.id
+                LEFT JOIN latest_assignment la ON la.claim_id = c.id
+                LEFT JOIN upload_meta um ON um.claim_id = c.id
+                LEFT JOIN legacy_data ldata ON ldata.claim_id = c.id
+                {where_sql}
+                {status_where}
+                {qc_where}
+                {tagged_where}
+                """
+            ),
+            params,
+        ).scalar_one()
+
+        rows = db.execute(
+            text(
+                f"""
+                WITH latest_report AS (
+                    SELECT DISTINCT ON (claim_id)
+                        claim_id, report_status, report_markdown, export_uri, version_no, created_at, created_by
+                    FROM report_versions
+                    ORDER BY claim_id, version_no DESC
+                ),
+                latest_assignment AS (
+                    SELECT DISTINCT ON (claim_id)
+                        claim_id,
+                        DATE(occurred_at) AS allotment_date
+                    FROM workflow_events
+                    WHERE event_type = 'claim_assigned'
+                    ORDER BY claim_id, occurred_at DESC
+                ),
+                report_counts AS (
+                    SELECT claim_id, COUNT(*) AS report_count
+                    FROM report_versions
+                    GROUP BY claim_id
+                ),
+                report_source_stats AS (
+                    SELECT
+                        claim_id,
+                        MAX(CASE WHEN {system_report_expr_stats} THEN 1 ELSE 0 END) AS has_system_html,
+                        MAX(CASE WHEN NOT ({system_report_expr_stats}) THEN 1 ELSE 0 END) AS has_doctor_html
+                    FROM report_versions
+                    WHERE NULLIF(TRIM(COALESCE(report_markdown, '')), '') IS NOT NULL
+                    GROUP BY claim_id
+                ),
+                upload_meta AS (
+                    SELECT
+                        claim_id,
+                        report_export_status,
+                        tagging,
+                        subtagging,
+                        opinion,
+                        qc_status,
+                        auditor_rating,
+                        auditor_rating_by,
+                        auditor_rating_at,
+                        updated_at
+                    FROM claim_report_uploads
+                ),
+                legacy_data AS (
+                    SELECT claim_id, legacy_payload
+                    FROM claim_legacy_data
+                )
+                SELECT
+                    c.id,
+                    c.external_claim_id,
+                    c.patient_name,
+                    c.assigned_doctor_id,
+                    c.updated_at,
+                    c.updated_at AS completed_at,
+                    {allotment_date_expr} AS allotment_date,
+                    COALESCE(rv.report_status, 'pending') AS report_status,
+                    COALESCE(rv.export_uri, '') AS export_uri,
+                    rv.created_at AS report_created_at,
+                    COALESCE(rv.version_no, 0) AS report_version,
+                    CASE WHEN NULLIF(TRIM(COALESCE(rv.report_markdown, '')), '') IS NULL THEN FALSE ELSE TRUE END AS report_html_available,
+                    CASE WHEN {system_report_expr_latest} THEN 'system' ELSE 'doctor' END AS latest_report_source,
+                    CASE WHEN COALESCE(rss.has_doctor_html, 0) = 1 THEN TRUE ELSE FALSE END AS doctor_report_html_available,
+                    CASE WHEN COALESCE(rss.has_system_html, 0) = 1 THEN TRUE ELSE FALSE END AS system_report_html_available,
+                    COALESCE(um.report_export_status, 'pending') AS stored_report_export_status,
+                    COALESCE(um.tagging, '') AS tagging,
+                    COALESCE(um.subtagging, '') AS subtagging,
+                    COALESCE(um.opinion, '') AS opinion,
+                    CASE WHEN LOWER(REPLACE(REPLACE(COALESCE(um.qc_status, 'no'), ' ', '_'), '-', '_')) IN ('yes', 'qc_yes', 'qcyes', 'qc_done', 'done') THEN 'yes' ELSE 'no' END AS qc_status,
+                    CASE
+                        WHEN COALESCE(um.auditor_rating, 0) BETWEEN 1 AND 5 THEN um.auditor_rating
+                        ELSE 0
+                    END AS auditor_rating,
+                    COALESCE(um.auditor_rating_by, '') AS auditor_rating_by,
+                    um.auditor_rating_at AS auditor_rating_at,
+                    um.updated_at AS upload_updated_at,
+                    COALESCE(rc.report_count, 0) AS report_count,
+                    {effective_status_expr} AS effective_report_status
+                FROM claims c
+                LEFT JOIN latest_report rv ON rv.claim_id = c.id
+                LEFT JOIN latest_assignment la ON la.claim_id = c.id
+                LEFT JOIN report_counts rc ON rc.claim_id = c.id
+                LEFT JOIN report_source_stats rss ON rss.claim_id = c.id
+                LEFT JOIN upload_meta um ON um.claim_id = c.id
+                LEFT JOIN legacy_data ldata ON ldata.claim_id = c.id
+                {where_sql}
+                {status_where}
+                {qc_where}
+                {tagged_where}
+                ORDER BY {order_by_sql}
+                LIMIT :limit OFFSET :offset
+                """
+            ),
+            params,
+        ).mappings().all()
+
+        items = []
+        for row in rows:
+            export_uri = str(row.get("export_uri") or "")
+            effective_status = str(row.get("effective_report_status") or "pending")
+            items.append(
+                {
+                    "claim_uuid": str(row["id"]),
+                    "external_claim_id": str(row["external_claim_id"]),
+                    "patient_name": str(row.get("patient_name") or ""),
+                    "assigned_doctor_id": str(row.get("assigned_doctor_id") or ""),
+                    "report_status": effective_status,
+                    "effective_report_status": effective_status,
+                    "report_uploaded": effective_status == "uploaded" or bool(export_uri),
+                    "export_uri": export_uri,
+                    "updated_at": row.get("updated_at"),
+                    "completed_at": row.get("completed_at"),
+                    "allotment_date": row.get("allotment_date"),
+                    "report_created_at": row.get("report_created_at"),
+                    "report_version": int(row.get("report_version") or 0),
+                    "report_html_available": bool(row.get("report_html_available") or False),
+                    "latest_report_source": str(row.get("latest_report_source") or "doctor"),
+                    "doctor_report_html_available": bool(row.get("doctor_report_html_available") or False),
+                    "system_report_html_available": bool(row.get("system_report_html_available") or False),
+                    "report_count": int(row.get("report_count") or 0),
+                    "tagging": _normalize_optional_text(row.get("tagging")),
+                    "subtagging": _normalize_optional_text(row.get("subtagging")),
+                    "opinion": _normalize_optional_text(row.get("opinion")),
+                    "qc_status": str(row.get("qc_status") or "no"),
+                    "auditor_rating": int(row.get("auditor_rating") or 0),
+                    "auditor_rating_by": str(row.get("auditor_rating_by") or ""),
+                    "auditor_rating_at": row.get("auditor_rating_at"),
+                    "upload_updated_at": row.get("upload_updated_at"),
+                }
+            )
+
+        return {
+            "total": int(total or 0),
+            "items": items,
+            "tagging_subtagging_options": TAGGING_SUBTAGGING_OPTIONS,
+        }
 
 
 @router.post("/completed-reports/{claim_id}/upload-status", response_model=CompletedReportUploadStatusResponse)
@@ -2003,196 +2004,196 @@ def allotment_date_wise_claims(
     }
 @router.get("/dashboard-overview")
 def dashboard_overview(
-    db: Session = Depends(get_db),
     _current_user: AuthenticatedUser = Depends(require_roles(UserRole.super_admin, UserRole.user)),
 ) -> dict:
-    _ensure_claim_report_uploads_table(db)
-    _ensure_claim_legacy_data_table(db)
+    with get_db_context() as db:
+        _ensure_claim_report_uploads_table(db)
+        _ensure_claim_legacy_data_table(db)
 
-    day_rows = db.execute(
-        text(
-            """
-            WITH latest_assignment AS (
-                SELECT DISTINCT ON (claim_id)
-                    claim_id,
-                    DATE(occurred_at) AS allotment_date
-                FROM workflow_events
-                WHERE event_type = 'claim_assigned'
-                ORDER BY claim_id, occurred_at DESC
-            ),
-            legacy_data AS (
-                SELECT claim_id, legacy_payload
-                FROM claim_legacy_data
-            ),
-            completed_base AS (
-                SELECT
-                    c.status,
-                    COALESCE(
-                        la.allotment_date,
-                        CASE
-                            WHEN NULLIF(TRIM(COALESCE(ldata.legacy_payload->>'allocation_date', '')), '') ~ '^\d{4}-\d{2}-\d{2}$'
-                                THEN TO_DATE(NULLIF(TRIM(COALESCE(ldata.legacy_payload->>'allocation_date', '')), ''), 'YYYY-MM-DD')
-                            WHEN NULLIF(TRIM(COALESCE(ldata.legacy_payload->>'allocation_date', '')), '') ~ '^\d{2}-\d{2}-\d{4}$'
-                                THEN TO_DATE(NULLIF(TRIM(COALESCE(ldata.legacy_payload->>'allocation_date', '')), ''), 'DD-MM-YYYY')
-                            WHEN NULLIF(TRIM(COALESCE(ldata.legacy_payload->>'allocation_date', '')), '') ~ '^\d{2}/\d{2}/\d{4}$'
-                                THEN TO_DATE(NULLIF(TRIM(COALESCE(ldata.legacy_payload->>'allocation_date', '')), ''), 'DD/MM/YYYY')
-                            ELSE NULL
-                        END,
-                        DATE(c.updated_at)
-                    ) AS allotment_date
-                FROM claims c
-                LEFT JOIN latest_assignment la ON la.claim_id = c.id
-                LEFT JOIN legacy_data ldata ON ldata.claim_id = c.id
-            )
-            SELECT
-                cb.allotment_date AS completed_date,
-                COUNT(*) AS completed_count
-            FROM completed_base cb
-            WHERE cb.status = 'completed'
-              AND cb.allotment_date >= DATE_TRUNC('month', CURRENT_DATE)::date
-              AND cb.allotment_date < (DATE_TRUNC('month', CURRENT_DATE) + INTERVAL '1 month')::date
-            GROUP BY cb.allotment_date
-            ORDER BY cb.allotment_date DESC
-            LIMIT 60
-            """
-        )
-    ).mappings().all()
-
-    fraud_row = db.execute(
-        text(
-            """
-            WITH upload_meta AS (
-                SELECT
-                    claim_id,
-                    tagging
-                FROM claim_report_uploads
-            ),
-            legacy_data AS (
-                SELECT
-                    claim_id,
-                    legacy_payload
-                FROM claim_legacy_data
-            ),
-            fraud_base AS (
-                SELECT
-                    LOWER(
-                        TRIM(
-                            COALESCE(NULLIF(TRIM(COALESCE(um.tagging, '')), ''), '')
-                        )
-                    ) AS tagging_value,
-                    TRIM(
+        day_rows = db.execute(
+            text(
+                """
+                WITH latest_assignment AS (
+                    SELECT DISTINCT ON (claim_id)
+                        claim_id,
+                        DATE(occurred_at) AS allotment_date
+                    FROM workflow_events
+                    WHERE event_type = 'claim_assigned'
+                    ORDER BY claim_id, occurred_at DESC
+                ),
+                legacy_data AS (
+                    SELECT claim_id, legacy_payload
+                    FROM claim_legacy_data
+                ),
+                completed_base AS (
+                    SELECT
+                        c.status,
                         COALESCE(
-                            ldata.legacy_payload->>'claim_amount',
-                            ldata.legacy_payload->>'claimamount',
-                            ldata.legacy_payload->>'claim amount',
-                            ''
-                        )
-                    ) AS claim_amount_text
-                FROM claims c
-                LEFT JOIN upload_meta um ON um.claim_id = c.id
-                LEFT JOIN legacy_data ldata ON ldata.claim_id = c.id
+                            la.allotment_date,
+                            CASE
+                                WHEN NULLIF(TRIM(COALESCE(ldata.legacy_payload->>'allocation_date', '')), '') ~ '^\d{4}-\d{2}-\d{2}$'
+                                    THEN TO_DATE(NULLIF(TRIM(COALESCE(ldata.legacy_payload->>'allocation_date', '')), ''), 'YYYY-MM-DD')
+                                WHEN NULLIF(TRIM(COALESCE(ldata.legacy_payload->>'allocation_date', '')), '') ~ '^\d{2}-\d{2}-\d{4}$'
+                                    THEN TO_DATE(NULLIF(TRIM(COALESCE(ldata.legacy_payload->>'allocation_date', '')), ''), 'DD-MM-YYYY')
+                                WHEN NULLIF(TRIM(COALESCE(ldata.legacy_payload->>'allocation_date', '')), '') ~ '^\d{2}/\d{2}/\d{4}$'
+                                    THEN TO_DATE(NULLIF(TRIM(COALESCE(ldata.legacy_payload->>'allocation_date', '')), ''), 'DD/MM/YYYY')
+                                ELSE NULL
+                            END,
+                            DATE(c.updated_at)
+                        ) AS allotment_date
+                    FROM claims c
+                    LEFT JOIN latest_assignment la ON la.claim_id = c.id
+                    LEFT JOIN legacy_data ldata ON ldata.claim_id = c.id
+                )
+                SELECT
+                    cb.allotment_date AS completed_date,
+                    COUNT(*) AS completed_count
+                FROM completed_base cb
+                WHERE cb.status = 'completed'
+                  AND cb.allotment_date >= DATE_TRUNC('month', CURRENT_DATE)::date
+                  AND cb.allotment_date < (DATE_TRUNC('month', CURRENT_DATE) + INTERVAL '1 month')::date
+                GROUP BY cb.allotment_date
+                ORDER BY cb.allotment_date DESC
+                LIMIT 60
+                """
             )
-            SELECT
-                COUNT(*) AS fraud_tagged_savings_cases,
-                COALESCE(
-                    SUM(
-                        CASE
-                            WHEN claim_amount_text ~* '^\\s*(inr|rs\\.?|₹)?\\s*[0-9]{1,3}(,[0-9]{2,3})*(\\.[0-9]+)?\\s*(/-)?\\s*$'
-                              OR claim_amount_text ~* '^\\s*(inr|rs\\.?|₹)?\\s*[0-9]+(\\.[0-9]+)?\\s*(/-)?\\s*$'
-                            THEN NULLIF(
-                                REGEXP_REPLACE(claim_amount_text, '[^0-9.]', '', 'g'),
+        ).mappings().all()
+
+        fraud_row = db.execute(
+            text(
+                """
+                WITH upload_meta AS (
+                    SELECT
+                        claim_id,
+                        tagging
+                    FROM claim_report_uploads
+                ),
+                legacy_data AS (
+                    SELECT
+                        claim_id,
+                        legacy_payload
+                    FROM claim_legacy_data
+                ),
+                fraud_base AS (
+                    SELECT
+                        LOWER(
+                            TRIM(
+                                COALESCE(NULLIF(TRIM(COALESCE(um.tagging, '')), ''), '')
+                            )
+                        ) AS tagging_value,
+                        TRIM(
+                            COALESCE(
+                                ldata.legacy_payload->>'claim_amount',
+                                ldata.legacy_payload->>'claimamount',
+                                ldata.legacy_payload->>'claim amount',
                                 ''
-                            )::NUMERIC
-                            ELSE 0
-                        END
-                    ),
-                    0
-                ) AS fraud_tagged_savings_amount
-            FROM fraud_base
-            WHERE tagging_value IN ('fraudulent', 'fraudlent')
-            """
-        )
-    ).mappings().one()
-
-    assignee_rows = db.execute(
-        text(
-            """
-            WITH upload_meta AS (
+                            )
+                        ) AS claim_amount_text
+                    FROM claims c
+                    LEFT JOIN upload_meta um ON um.claim_id = c.id
+                    LEFT JOIN legacy_data ldata ON ldata.claim_id = c.id
+                )
                 SELECT
-                    claim_id,
-                    CASE
-                        WHEN COALESCE(auditor_rating, 0) BETWEEN 1 AND 5 THEN auditor_rating
-                        ELSE 0
-                    END AS auditor_rating
-                FROM claim_report_uploads
-            ),
-            claim_assignees AS (
-                SELECT
-                    c.id AS claim_id,
-                    c.status,
-                    COALESCE(um.auditor_rating, 0) AS auditor_rating,
-                    assignee AS assignee_key
-                FROM claims c
-                LEFT JOIN upload_meta um ON um.claim_id = c.id
-                CROSS JOIN LATERAL unnest(
-                    string_to_array(
-                        LOWER(REPLACE(COALESCE(c.assigned_doctor_id, ''), ' ', '')),
-                        ','
-                    )
-                ) AS assignee
-                WHERE NULLIF(TRIM(COALESCE(c.assigned_doctor_id, '')), '') IS NOT NULL
-                  AND NULLIF(TRIM(assignee), '') IS NOT NULL
-            ),
-            assignee_stats AS (
-                SELECT
-                    ca.assignee_key,
-                    COUNT(*) FILTER (WHERE ca.status = 'completed') AS completed_count,
-                    COUNT(*) FILTER (WHERE ca.status NOT IN ('completed', 'withdrawn')) AS pending_count,
-                    COALESCE(SUM(CASE WHEN ca.status = 'completed' THEN ca.auditor_rating ELSE 0 END), 0) AS auditor_total_stars,
-                    COUNT(*) FILTER (WHERE ca.status = 'completed' AND ca.auditor_rating > 0) AS rated_completed_count
-                FROM claim_assignees ca
-                GROUP BY ca.assignee_key
+                    COUNT(*) AS fraud_tagged_savings_cases,
+                    COALESCE(
+                        SUM(
+                            CASE
+                                WHEN claim_amount_text ~* '^\\s*(inr|rs\\.?|₹)?\\s*[0-9]{1,3}(,[0-9]{2,3})*(\\.[0-9]+)?\\s*(/-)?\\s*$'
+                                  OR claim_amount_text ~* '^\\s*(inr|rs\\.?|₹)?\\s*[0-9]+(\\.[0-9]+)?\\s*(/-)?\\s*$'
+                                THEN NULLIF(
+                                    REGEXP_REPLACE(claim_amount_text, '[^0-9.]', '', 'g'),
+                                    ''
+                                )::NUMERIC
+                                ELSE 0
+                            END
+                        ),
+                        0
+                    ) AS fraud_tagged_savings_amount
+                FROM fraud_base
+                WHERE tagging_value IN ('fraudulent', 'fraudlent')
+                """
             )
-            SELECT
-                COALESCE(u.username, s.assignee_key) AS username,
-                COALESCE(CAST(u.role AS TEXT), '') AS role,
-                CAST(s.completed_count AS INTEGER) AS completed_count,
-                CAST(s.pending_count AS INTEGER) AS pending_count,
-                CAST(s.completed_count + s.pending_count AS INTEGER) AS total_count,
-                CAST(s.auditor_total_stars AS INTEGER) AS auditor_total_stars,
-                CAST(s.rated_completed_count AS INTEGER) AS rated_completed_count
-            FROM assignee_stats s
-            LEFT JOIN users u
-                ON LOWER(u.username) = s.assignee_key
-            ORDER BY (s.completed_count + s.pending_count) DESC, COALESCE(u.username, s.assignee_key) ASC
-            LIMIT 500
-            """
-        )
-    ).mappings().all()
+        ).mappings().one()
 
-    return {
-        "day_wise_completed": [
-            {
-                "date": str(r.get("completed_date") or ""),
-                "completed": int(r.get("completed_count") or 0),
-            }
-            for r in day_rows
-        ],
-        "assignee_wise": [
-            {
-                "username": str(r.get("username") or "-"),
-                "role": str(r.get("role") or ""),
-                "completed": int(r.get("completed_count") or 0),
-                "pending": int(r.get("pending_count") or 0),
-                "total": int(r.get("total_count") or 0),
-                "auditor_total_stars": int(r.get("auditor_total_stars") or 0),
-                "rated_completed_count": int(r.get("rated_completed_count") or 0),
-            }
-            for r in assignee_rows
-        ],
-        "fraud_tagged_savings_cases": int(fraud_row.get("fraud_tagged_savings_cases") or 0),
-        "fraud_tagged_savings_amount": float(fraud_row.get("fraud_tagged_savings_amount") or 0),
-    }
+        assignee_rows = db.execute(
+            text(
+                """
+                WITH upload_meta AS (
+                    SELECT
+                        claim_id,
+                        CASE
+                            WHEN COALESCE(auditor_rating, 0) BETWEEN 1 AND 5 THEN auditor_rating
+                            ELSE 0
+                        END AS auditor_rating
+                    FROM claim_report_uploads
+                ),
+                claim_assignees AS (
+                    SELECT
+                        c.id AS claim_id,
+                        c.status,
+                        COALESCE(um.auditor_rating, 0) AS auditor_rating,
+                        assignee AS assignee_key
+                    FROM claims c
+                    LEFT JOIN upload_meta um ON um.claim_id = c.id
+                    CROSS JOIN LATERAL unnest(
+                        string_to_array(
+                            LOWER(REPLACE(COALESCE(c.assigned_doctor_id, ''), ' ', '')),
+                            ','
+                        )
+                    ) AS assignee
+                    WHERE NULLIF(TRIM(COALESCE(c.assigned_doctor_id, '')), '') IS NOT NULL
+                      AND NULLIF(TRIM(assignee), '') IS NOT NULL
+                ),
+                assignee_stats AS (
+                    SELECT
+                        ca.assignee_key,
+                        COUNT(*) FILTER (WHERE ca.status = 'completed') AS completed_count,
+                        COUNT(*) FILTER (WHERE ca.status NOT IN ('completed', 'withdrawn')) AS pending_count,
+                        COALESCE(SUM(CASE WHEN ca.status = 'completed' THEN ca.auditor_rating ELSE 0 END), 0) AS auditor_total_stars,
+                        COUNT(*) FILTER (WHERE ca.status = 'completed' AND ca.auditor_rating > 0) AS rated_completed_count
+                    FROM claim_assignees ca
+                    GROUP BY ca.assignee_key
+                )
+                SELECT
+                    COALESCE(u.username, s.assignee_key) AS username,
+                    COALESCE(CAST(u.role AS TEXT), '') AS role,
+                    CAST(s.completed_count AS INTEGER) AS completed_count,
+                    CAST(s.pending_count AS INTEGER) AS pending_count,
+                    CAST(s.completed_count + s.pending_count AS INTEGER) AS total_count,
+                    CAST(s.auditor_total_stars AS INTEGER) AS auditor_total_stars,
+                    CAST(s.rated_completed_count AS INTEGER) AS rated_completed_count
+                FROM assignee_stats s
+                LEFT JOIN users u
+                    ON LOWER(u.username) = s.assignee_key
+                ORDER BY (s.completed_count + s.pending_count) DESC, COALESCE(u.username, s.assignee_key) ASC
+                LIMIT 500
+                """
+            )
+        ).mappings().all()
+
+        return {
+            "day_wise_completed": [
+                {
+                    "date": str(r.get("completed_date") or ""),
+                    "completed": int(r.get("completed_count") or 0),
+                }
+                for r in day_rows
+            ],
+            "assignee_wise": [
+                {
+                    "username": str(r.get("username") or "-"),
+                    "role": str(r.get("role") or ""),
+                    "completed": int(r.get("completed_count") or 0),
+                    "pending": int(r.get("pending_count") or 0),
+                    "total": int(r.get("total_count") or 0),
+                    "auditor_total_stars": int(r.get("auditor_total_stars") or 0),
+                    "rated_completed_count": int(r.get("rated_completed_count") or 0),
+                }
+                for r in assignee_rows
+            ],
+            "fraud_tagged_savings_cases": int(fraud_row.get("fraud_tagged_savings_cases") or 0),
+            "fraud_tagged_savings_amount": float(fraud_row.get("fraud_tagged_savings_amount") or 0),
+        }
 @router.get("/doctor-completion-stats")
 def doctor_completion_stats(
     month: str | None = Query(default=None),
@@ -2505,447 +2506,447 @@ def claim_document_status(
     sort_order: str = Query(default="desc"),
     limit: int = Query(default=200, ge=1, le=500),
     offset: int = Query(default=0, ge=0),
-    db: Session = Depends(get_db),
     current_user: AuthenticatedUser = Depends(require_roles(UserRole.super_admin, UserRole.user, UserRole.doctor, UserRole.auditor)),
 ) -> dict:
-    _ensure_claim_legacy_data_table(db)
-    _ensure_claim_report_uploads_table(db)
+    with get_db_context() as db:
+        _ensure_claim_legacy_data_table(db)
+        _ensure_claim_report_uploads_table(db)
 
-    valid_statuses = {
-        "ready_for_assignment",
-        "waiting_for_documents",
-        "pending",
-        "in_review",
-        "needs_qc",
-        "completed",
-        "withdrawn",
-        "all",
-    }
-    normalized_status = (status_filter or "all").strip().lower()
-    if normalized_status not in valid_statuses:
-        normalized_status = "all"
+        valid_statuses = {
+            "ready_for_assignment",
+            "waiting_for_documents",
+            "pending",
+            "in_review",
+            "needs_qc",
+            "completed",
+            "withdrawn",
+            "all",
+        }
+        normalized_status = (status_filter or "all").strip().lower()
+        if normalized_status not in valid_statuses:
+            normalized_status = "all"
 
-    normalized_document_upload = (document_upload or "all").strip().lower()
-    if normalized_document_upload not in {"all", "yes", "no"}:
-        normalized_document_upload = "all"
+        normalized_document_upload = (document_upload or "all").strip().lower()
+        if normalized_document_upload not in {"all", "yes", "no"}:
+            normalized_document_upload = "all"
 
-    order_sql = "ASC" if (sort_order or "").strip().lower() == "asc" else "DESC"
+        order_sql = "ASC" if (sort_order or "").strip().lower() == "asc" else "DESC"
 
-    filters: list[str] = []
-    params: dict[str, Any] = {"limit": limit, "offset": offset}
-    completed_uploaded_expr = (
-        "((NULLIF(TRIM(COALESCE(um.tagging, '')), '') IS NOT NULL "
-        "OR NULLIF(TRIM(COALESCE(um.subtagging, '')), '') IS NOT NULL "
-        "OR NULLIF(TRIM(COALESCE(um.opinion, '')), '') IS NOT NULL) "
-        "OR COALESCE(um.report_export_status, 'pending') = 'uploaded' "
-        "OR COALESCE(rv.export_uri, '') <> '')"
-    )
-
-    if search_claim and search_claim.strip():
-        filters.append("LOWER(c.external_claim_id) LIKE :search_claim")
-        params["search_claim"] = f"%{search_claim.strip().lower()}%"
-
-    if _is_valid_date(allotment_date):
-        filters.append(
-            """
-            COALESCE(
-                la.allotment_date,
-                CASE
-                    WHEN NULLIF(TRIM(COALESCE(ldata.legacy_payload->>'allocation_date', '')), '') ~ '^\\d{4}-\\d{2}-\\d{2}$'
-                        THEN TO_DATE(NULLIF(TRIM(COALESCE(ldata.legacy_payload->>'allocation_date', '')), ''), 'YYYY-MM-DD')
-                    WHEN NULLIF(TRIM(COALESCE(ldata.legacy_payload->>'allocation_date', '')), '') ~ '^\\d{2}-\\d{2}-\\d{4}$'
-                        THEN TO_DATE(NULLIF(TRIM(COALESCE(ldata.legacy_payload->>'allocation_date', '')), ''), 'DD-MM-YYYY')
-                    WHEN NULLIF(TRIM(COALESCE(ldata.legacy_payload->>'allocation_date', '')), '') ~ '^\\d{2}/\\d{2}/\\d{4}$'
-                        THEN TO_DATE(NULLIF(TRIM(COALESCE(ldata.legacy_payload->>'allocation_date', '')), ''), 'DD/MM/YYYY')
-                    ELSE NULL
-                END
-            ) = :allotment_date
-            """
+        filters: list[str] = []
+        params: dict[str, Any] = {"limit": limit, "offset": offset}
+        completed_uploaded_expr = (
+            "((NULLIF(TRIM(COALESCE(um.tagging, '')), '') IS NOT NULL "
+            "OR NULLIF(TRIM(COALESCE(um.subtagging, '')), '') IS NOT NULL "
+            "OR NULLIF(TRIM(COALESCE(um.opinion, '')), '') IS NOT NULL) "
+            "OR COALESCE(um.report_export_status, 'pending') = 'uploaded' "
+            "OR COALESCE(rv.export_uri, '') <> '')"
         )
-        params["allotment_date"] = allotment_date
 
-    if normalized_document_upload == "yes":
-        filters.append("COALESCE(ds.documents, 0) > 0")
-    elif normalized_document_upload == "no":
-        filters.append("COALESCE(ds.documents, 0) = 0")
+        if search_claim and search_claim.strip():
+            filters.append("LOWER(c.external_claim_id) LIKE :search_claim")
+            params["search_claim"] = f"%{search_claim.strip().lower()}%"
 
-    if normalized_status == "pending":
-        filters.append("c.status = 'waiting_for_documents'")
-        filters.append("COALESCE(ds.documents, 0) > 0")
-    elif normalized_status == "waiting_for_documents":
-        filters.append("c.status = 'waiting_for_documents'")
-        filters.append("COALESCE(ds.documents, 0) = 0")
-    elif normalized_status != "all":
-        filters.append("c.status = :status_filter")
-        params["status_filter"] = normalized_status
-    if exclude_completed:
-        filters.append("c.status <> 'completed'")
-    if exclude_completed_uploaded:
-        filters.append(f"NOT (c.status = 'completed' AND {completed_uploaded_expr})")
-    auto_exclude_withdrawn = normalized_status != "withdrawn"
-    if exclude_withdrawn or auto_exclude_withdrawn:
-        filters.append("c.status <> 'withdrawn'")
-    if exclude_tagged:
-        filters.append("NULLIF(TRIM(COALESCE(um.tagging, '')), '') IS NULL")
-    effective_doctors = _split_doctor_filter(doctor_filter)
-    if current_user.role == UserRole.doctor:
-        doctor_token = _normalize_doctor_token(current_user.username)
-        effective_doctors = [doctor_token] if doctor_token else []
-
-    if effective_doctors:
-        doctor_clauses: list[str] = []
-        for idx, doctor in enumerate(effective_doctors):
-            key = f"doctor_{idx}"
-            params[key] = doctor
-            doctor_clauses.append(
-                f":{key} = ANY(string_to_array(regexp_replace(LOWER(COALESCE(c.assigned_doctor_id, '')), '[^a-z0-9,]+', '', 'g'), ','))"
-            )
-        filters.append("(" + " OR ".join(doctor_clauses) + ")")
-
-    where_sql = ("WHERE " + " AND ".join(filters)) if filters else ""
-
-    total = db.execute(
-        text(
-            f"""
-            WITH latest_assignment AS (
-                SELECT DISTINCT ON (claim_id)
-                    claim_id,
-                    occurred_at AS assigned_at,
-                    DATE(occurred_at) AS allotment_date
-                FROM workflow_events
-                WHERE event_type = 'claim_assigned'
-                ORDER BY claim_id, occurred_at DESC
-            ),
-            doc_stats AS (
-                SELECT
-                    cd.claim_id,
-                    COUNT(*) AS documents,
-                    SUM(
-                        CASE
-                            WHEN (cd.metadata->>'merge_source_file_count') ~ '^[0-9]+$'
-                                AND CAST(cd.metadata->>'merge_source_file_count' AS INTEGER) > 0
-                                THEN CAST(cd.metadata->>'merge_source_file_count' AS INTEGER)
-                            WHEN (cd.metadata->>'merge_accepted_file_count') ~ '^[0-9]+$'
-                                AND CAST(cd.metadata->>'merge_accepted_file_count' AS INTEGER) > 0
-                                THEN CAST(cd.metadata->>'merge_accepted_file_count' AS INTEGER)
-                            ELSE 1
-                        END
-                    ) AS source_files,
-                    MAX(cd.uploaded_at) AS last_upload,
-                    (
-                        ARRAY_REMOVE(
-                            ARRAY_AGG(NULLIF(TRIM(COALESCE(cd.uploaded_by, '')), '') ORDER BY cd.uploaded_at DESC NULLS LAST),
-                            NULL
-                        )
-                    )[1] AS last_uploaded_by
-                FROM claim_documents cd
-                GROUP BY cd.claim_id
-            ),
-            latest_report AS (
-                SELECT DISTINCT ON (claim_id)
-                    claim_id,
-                    export_uri
-                FROM report_versions
-                ORDER BY claim_id, version_no DESC
-            ),
-            upload_meta AS (
-                SELECT
-                    claim_id,
-                    report_export_status,
-                    tagging,
-                    subtagging,
-                    opinion
-                FROM claim_report_uploads
-            )
-            SELECT COUNT(*)
-            FROM claims c
-            LEFT JOIN latest_assignment la ON la.claim_id = c.id
-            LEFT JOIN doc_stats ds ON ds.claim_id = c.id
-            LEFT JOIN latest_report rv ON rv.claim_id = c.id
-            LEFT JOIN upload_meta um ON um.claim_id = c.id
-            {where_sql}
-            """
-        ),
-        params,
-    ).scalar_one()
-
-    rows = db.execute(
-        text(
-            f"""
-            WITH latest_assignment AS (
-                SELECT DISTINCT ON (claim_id)
-                    claim_id,
-                    occurred_at AS assigned_at,
-                    DATE(occurred_at) AS allotment_date
-                FROM workflow_events
-                WHERE event_type = 'claim_assigned'
-                ORDER BY claim_id, occurred_at DESC
-            ),
-            doc_stats AS (
-                SELECT
-                    cd.claim_id,
-                    COUNT(*) AS documents,
-                    SUM(
-                        CASE
-                            WHEN (cd.metadata->>'merge_source_file_count') ~ '^[0-9]+$'
-                                AND CAST(cd.metadata->>'merge_source_file_count' AS INTEGER) > 0
-                                THEN CAST(cd.metadata->>'merge_source_file_count' AS INTEGER)
-                            WHEN (cd.metadata->>'merge_accepted_file_count') ~ '^[0-9]+$'
-                                AND CAST(cd.metadata->>'merge_accepted_file_count' AS INTEGER) > 0
-                                THEN CAST(cd.metadata->>'merge_accepted_file_count' AS INTEGER)
-                            ELSE 1
-                        END
-                    ) AS source_files,
-                    MAX(cd.uploaded_at) AS last_upload,
-                    (
-                        ARRAY_REMOVE(
-                            ARRAY_AGG(NULLIF(TRIM(COALESCE(cd.uploaded_by, '')), '') ORDER BY cd.uploaded_at DESC NULLS LAST),
-                            NULL
-                        )
-                    )[1] AS last_uploaded_by
-                FROM claim_documents cd
-                GROUP BY cd.claim_id
-            ),
-            latest_report AS (
-                SELECT DISTINCT ON (claim_id)
-                    claim_id,
-                    export_uri
-                FROM report_versions
-                ORDER BY claim_id, version_no DESC
-            ),
-            upload_meta AS (
-                SELECT
-                    claim_id,
-                    report_export_status,
-                    tagging,
-                    subtagging,
-                    opinion
-                FROM claim_report_uploads
-            ),
-            latest_decision AS (
-                SELECT DISTINCT ON (claim_id)
-                    claim_id,
-                    recommendation,
-                    explanation_summary,
-                    generated_at
-                FROM decision_results
-                WHERE is_active = TRUE
-                ORDER BY claim_id, generated_at DESC
-            ),
-            latest_auditor_learning AS (
-                SELECT DISTINCT ON (claim_id)
-                    claim_id,
-                    NULLIF(TRIM(COALESCE(notes, '')), '') AS learning_note
-                FROM feedback_labels
-                WHERE LOWER(TRIM(label_type)) = 'auditor_report_learning'
-                ORDER BY claim_id, created_at DESC
-            ),
-            latest_send_back AS (
-                SELECT DISTINCT ON (claim_id)
-                    claim_id,
-                    NULLIF(TRIM(COALESCE(event_payload->>'note', '')), '') AS send_back_reason,
-                    occurred_at AS send_back_at
-                FROM workflow_events
-                WHERE event_type = 'claim_status_updated'
-                  AND LOWER(COALESCE(event_payload->>'status', '')) = 'in_review'
-                  AND NULLIF(TRIM(COALESCE(event_payload->>'note', '')), '') IS NOT NULL
-                ORDER BY claim_id, occurred_at DESC
-            ),
-            latest_verifai_queue AS (
-                SELECT DISTINCT ON (claim_id)
-                    claim_id,
-                    occurred_at AS queued_at,
-                    COALESCE(NULLIF(TRIM(COALESCE(event_payload->>'verifai_case_id', '')), ''), '') AS verifai_case_id,
-                    COALESCE(NULLIF(TRIM(COALESCE(event_payload->>'verifai_status', '')), ''), '') AS verifai_status,
-                    COALESCE(NULLIF(TRIM(COALESCE(event_payload->>'verifai_stage', '')), ''), '') AS verifai_stage
-                FROM workflow_events
-                WHERE event_type = 'verifai_claim_queued'
-                ORDER BY claim_id, occurred_at DESC
-            ),
-            legacy_data AS (
-                SELECT claim_id, legacy_payload
-                FROM claim_legacy_data
-            )
-            SELECT
-                c.id,
-                c.external_claim_id,
-                c.assigned_doctor_id,
-                c.tags,
-                c.status,
-                CASE
-                    WHEN c.status = 'waiting_for_documents' AND COALESCE(ds.documents, 0) > 0 THEN 'pending'
-                    ELSE c.status::text
-                END AS status_display,
-                la.assigned_at,
-                la.allotment_date,
-                COALESCE(ds.documents, 0) AS documents,
-                COALESCE(ds.source_files, 0) AS source_files,
-                ds.last_upload,
-                COALESCE(ds.last_uploaded_by, '') AS last_uploaded_by,
-                COALESCE(NULLIF(TRIM(ld.explanation_summary), ''), COALESCE(ld.recommendation::text, 'Pending')) AS final_status,
+        if _is_valid_date(allotment_date):
+            filters.append(
+                """
                 COALESCE(
-                    NULLIF(TRIM(COALESCE(ldata.legacy_payload->>'doa_date', '')), ''),
-                    NULLIF(TRIM(COALESCE(ldata.legacy_payload->>'doa', '')), ''),
-                    NULLIF(TRIM(COALESCE(ldata.legacy_payload->>'doa date', '')), ''),
-                    NULLIF(TRIM(COALESCE(ldata.legacy_payload->>'date_of_admission', '')), ''),
-                    NULLIF(TRIM(COALESCE(ldata.legacy_payload->>'date of admission', '')), ''),
-                    NULLIF(TRIM(COALESCE(ldata.legacy_payload->>'admission_date', '')), ''),
-                    NULLIF(TRIM(COALESCE(ldata.legacy_payload->>'admission date', '')), '')
-                ) AS doa_date,
-                COALESCE(
-                    NULLIF(TRIM(COALESCE(ldata.legacy_payload->>'dod_date', '')), ''),
-                    NULLIF(TRIM(COALESCE(ldata.legacy_payload->>'dod', '')), ''),
-                    NULLIF(TRIM(COALESCE(ldata.legacy_payload->>'dod date', '')), ''),
-                    NULLIF(TRIM(COALESCE(ldata.legacy_payload->>'date_of_discharge', '')), ''),
-                    NULLIF(TRIM(COALESCE(ldata.legacy_payload->>'date of discharge', '')), ''),
-                    NULLIF(TRIM(COALESCE(ldata.legacy_payload->>'discharge_date', '')), ''),
-                    NULLIF(TRIM(COALESCE(ldata.legacy_payload->>'discharge date', '')), '')
-                ) AS dod_date,
-                COALESCE(al.learning_note, '') AS auditor_learning,
-                COALESCE(lsb.send_back_reason, '') AS send_back_reason,
-                lvq.queued_at AS verifai_queued_at,
-                COALESCE(lvq.verifai_case_id, '') AS verifai_case_id,
-                COALESCE(lvq.verifai_status, '') AS verifai_status,
-                COALESCE(lvq.verifai_stage, '') AS verifai_stage,
-                ldata.legacy_payload AS legacy_payload
-            FROM claims c
-            LEFT JOIN latest_assignment la ON la.claim_id = c.id
-            LEFT JOIN doc_stats ds ON ds.claim_id = c.id
-            LEFT JOIN latest_report rv ON rv.claim_id = c.id
-            LEFT JOIN upload_meta um ON um.claim_id = c.id
-            LEFT JOIN latest_decision ld ON ld.claim_id = c.id
-            LEFT JOIN latest_auditor_learning al ON al.claim_id = c.id
-            LEFT JOIN latest_send_back lsb ON lsb.claim_id = c.id
-            LEFT JOIN latest_verifai_queue lvq ON lvq.claim_id = c.id
-            LEFT JOIN legacy_data ldata ON ldata.claim_id = c.id
-            {where_sql}
-            ORDER BY COALESCE(la.allotment_date, DATE(c.updated_at)) {order_sql}, c.updated_at {order_sql}
-            LIMIT :limit OFFSET :offset
-            """
-        ),
-        params,
-    ).mappings().all()
+                    la.allotment_date,
+                    CASE
+                        WHEN NULLIF(TRIM(COALESCE(ldata.legacy_payload->>'allocation_date', '')), '') ~ '^\\d{4}-\\d{2}-\\d{2}$'
+                            THEN TO_DATE(NULLIF(TRIM(COALESCE(ldata.legacy_payload->>'allocation_date', '')), ''), 'YYYY-MM-DD')
+                        WHEN NULLIF(TRIM(COALESCE(ldata.legacy_payload->>'allocation_date', '')), '') ~ '^\\d{2}-\\d{2}-\\d{4}$'
+                            THEN TO_DATE(NULLIF(TRIM(COALESCE(ldata.legacy_payload->>'allocation_date', '')), ''), 'DD-MM-YYYY')
+                        WHEN NULLIF(TRIM(COALESCE(ldata.legacy_payload->>'allocation_date', '')), '') ~ '^\\d{2}/\\d{2}/\\d{4}$'
+                            THEN TO_DATE(NULLIF(TRIM(COALESCE(ldata.legacy_payload->>'allocation_date', '')), ''), 'DD/MM/YYYY')
+                        ELSE NULL
+                    END
+                ) = :allotment_date
+                """
+            )
+            params["allotment_date"] = allotment_date
 
-    claim_ids = [str(r.get("id") or "").strip() for r in rows if str(r.get("id") or "").strip()]
-    handwriting_by_claim: dict[str, dict[str, Any]] = {}
-    if claim_ids:
-        try:
-            doc_rows = db.execute(
-                text(
-                    """
+        if normalized_document_upload == "yes":
+            filters.append("COALESCE(ds.documents, 0) > 0")
+        elif normalized_document_upload == "no":
+            filters.append("COALESCE(ds.documents, 0) = 0")
+
+        if normalized_status == "pending":
+            filters.append("c.status = 'waiting_for_documents'")
+            filters.append("COALESCE(ds.documents, 0) > 0")
+        elif normalized_status == "waiting_for_documents":
+            filters.append("c.status = 'waiting_for_documents'")
+            filters.append("COALESCE(ds.documents, 0) = 0")
+        elif normalized_status != "all":
+            filters.append("c.status = :status_filter")
+            params["status_filter"] = normalized_status
+        if exclude_completed:
+            filters.append("c.status <> 'completed'")
+        if exclude_completed_uploaded:
+            filters.append(f"NOT (c.status = 'completed' AND {completed_uploaded_expr})")
+        auto_exclude_withdrawn = normalized_status != "withdrawn"
+        if exclude_withdrawn or auto_exclude_withdrawn:
+            filters.append("c.status <> 'withdrawn'")
+        if exclude_tagged:
+            filters.append("NULLIF(TRIM(COALESCE(um.tagging, '')), '') IS NULL")
+        effective_doctors = _split_doctor_filter(doctor_filter)
+        if current_user.role == UserRole.doctor:
+            doctor_token = _normalize_doctor_token(current_user.username)
+            effective_doctors = [doctor_token] if doctor_token else []
+
+        if effective_doctors:
+            doctor_clauses: list[str] = []
+            for idx, doctor in enumerate(effective_doctors):
+                key = f"doctor_{idx}"
+                params[key] = doctor
+                doctor_clauses.append(
+                    f":{key} = ANY(string_to_array(regexp_replace(LOWER(COALESCE(c.assigned_doctor_id, '')), '[^a-z0-9,]+', '', 'g'), ','))"
+                )
+            filters.append("(" + " OR ".join(doctor_clauses) + ")")
+
+        where_sql = ("WHERE " + " AND ".join(filters)) if filters else ""
+
+        total = db.execute(
+            text(
+                f"""
+                WITH latest_assignment AS (
+                    SELECT DISTINCT ON (claim_id)
+                        claim_id,
+                        occurred_at AS assigned_at,
+                        DATE(occurred_at) AS allotment_date
+                    FROM workflow_events
+                    WHERE event_type = 'claim_assigned'
+                    ORDER BY claim_id, occurred_at DESC
+                ),
+                doc_stats AS (
                     SELECT
                         cd.claim_id,
-                        cd.id AS document_id,
-                        COALESCE(cd.file_name, '') AS file_name,
-                        de.extracted_entities
+                        COUNT(*) AS documents,
+                        SUM(
+                            CASE
+                                WHEN (cd.metadata->>'merge_source_file_count') ~ '^[0-9]+$'
+                                    AND CAST(cd.metadata->>'merge_source_file_count' AS INTEGER) > 0
+                                    THEN CAST(cd.metadata->>'merge_source_file_count' AS INTEGER)
+                                WHEN (cd.metadata->>'merge_accepted_file_count') ~ '^[0-9]+$'
+                                    AND CAST(cd.metadata->>'merge_accepted_file_count' AS INTEGER) > 0
+                                    THEN CAST(cd.metadata->>'merge_accepted_file_count' AS INTEGER)
+                                ELSE 1
+                            END
+                        ) AS source_files,
+                        MAX(cd.uploaded_at) AS last_upload,
+                        (
+                            ARRAY_REMOVE(
+                                ARRAY_AGG(NULLIF(TRIM(COALESCE(cd.uploaded_by, '')), '') ORDER BY cd.uploaded_at DESC NULLS LAST),
+                                NULL
+                            )
+                        )[1] AS last_uploaded_by
                     FROM claim_documents cd
-                    LEFT JOIN LATERAL (
-                        SELECT dex.extracted_entities
-                        FROM document_extractions dex
-                        WHERE dex.document_id = cd.id
-                        ORDER BY dex.created_at DESC
-                        LIMIT 1
-                    ) de ON TRUE
-                    WHERE CAST(cd.claim_id AS TEXT) IN :claim_ids
-                    """
-                ).bindparams(bindparam("claim_ids", expanding=True)),
-                {"claim_ids": claim_ids},
-            ).mappings().all()
+                    GROUP BY cd.claim_id
+                ),
+                latest_report AS (
+                    SELECT DISTINCT ON (claim_id)
+                        claim_id,
+                        export_uri
+                    FROM report_versions
+                    ORDER BY claim_id, version_no DESC
+                ),
+                upload_meta AS (
+                    SELECT
+                        claim_id,
+                        report_export_status,
+                        tagging,
+                        subtagging,
+                        opinion
+                    FROM claim_report_uploads
+                )
+                SELECT COUNT(*)
+                FROM claims c
+                LEFT JOIN latest_assignment la ON la.claim_id = c.id
+                LEFT JOIN doc_stats ds ON ds.claim_id = c.id
+                LEFT JOIN latest_report rv ON rv.claim_id = c.id
+                LEFT JOIN upload_meta um ON um.claim_id = c.id
+                {where_sql}
+                """
+            ),
+            params,
+        ).scalar_one()
 
-            docs_by_claim: dict[str, list[dict[str, Any]]] = {}
-            for d in doc_rows:
-                claim_key = str(d.get("claim_id") or "").strip()
-                if not claim_key:
-                    continue
-                docs_by_claim.setdefault(claim_key, []).append(dict(d))
+        rows = db.execute(
+            text(
+                f"""
+                WITH latest_assignment AS (
+                    SELECT DISTINCT ON (claim_id)
+                        claim_id,
+                        occurred_at AS assigned_at,
+                        DATE(occurred_at) AS allotment_date
+                    FROM workflow_events
+                    WHERE event_type = 'claim_assigned'
+                    ORDER BY claim_id, occurred_at DESC
+                ),
+                doc_stats AS (
+                    SELECT
+                        cd.claim_id,
+                        COUNT(*) AS documents,
+                        SUM(
+                            CASE
+                                WHEN (cd.metadata->>'merge_source_file_count') ~ '^[0-9]+$'
+                                    AND CAST(cd.metadata->>'merge_source_file_count' AS INTEGER) > 0
+                                    THEN CAST(cd.metadata->>'merge_source_file_count' AS INTEGER)
+                                WHEN (cd.metadata->>'merge_accepted_file_count') ~ '^[0-9]+$'
+                                    AND CAST(cd.metadata->>'merge_accepted_file_count' AS INTEGER) > 0
+                                    THEN CAST(cd.metadata->>'merge_accepted_file_count' AS INTEGER)
+                                ELSE 1
+                            END
+                        ) AS source_files,
+                        MAX(cd.uploaded_at) AS last_upload,
+                        (
+                            ARRAY_REMOVE(
+                                ARRAY_AGG(NULLIF(TRIM(COALESCE(cd.uploaded_by, '')), '') ORDER BY cd.uploaded_at DESC NULLS LAST),
+                                NULL
+                            )
+                        )[1] AS last_uploaded_by
+                    FROM claim_documents cd
+                    GROUP BY cd.claim_id
+                ),
+                latest_report AS (
+                    SELECT DISTINCT ON (claim_id)
+                        claim_id,
+                        export_uri
+                    FROM report_versions
+                    ORDER BY claim_id, version_no DESC
+                ),
+                upload_meta AS (
+                    SELECT
+                        claim_id,
+                        report_export_status,
+                        tagging,
+                        subtagging,
+                        opinion
+                    FROM claim_report_uploads
+                ),
+                latest_decision AS (
+                    SELECT DISTINCT ON (claim_id)
+                        claim_id,
+                        recommendation,
+                        explanation_summary,
+                        generated_at
+                    FROM decision_results
+                    WHERE is_active = TRUE
+                    ORDER BY claim_id, generated_at DESC
+                ),
+                latest_auditor_learning AS (
+                    SELECT DISTINCT ON (claim_id)
+                        claim_id,
+                        NULLIF(TRIM(COALESCE(notes, '')), '') AS learning_note
+                    FROM feedback_labels
+                    WHERE LOWER(TRIM(label_type)) = 'auditor_report_learning'
+                    ORDER BY claim_id, created_at DESC
+                ),
+                latest_send_back AS (
+                    SELECT DISTINCT ON (claim_id)
+                        claim_id,
+                        NULLIF(TRIM(COALESCE(event_payload->>'note', '')), '') AS send_back_reason,
+                        occurred_at AS send_back_at
+                    FROM workflow_events
+                    WHERE event_type = 'claim_status_updated'
+                      AND LOWER(COALESCE(event_payload->>'status', '')) = 'in_review'
+                      AND NULLIF(TRIM(COALESCE(event_payload->>'note', '')), '') IS NOT NULL
+                    ORDER BY claim_id, occurred_at DESC
+                ),
+                latest_verifai_queue AS (
+                    SELECT DISTINCT ON (claim_id)
+                        claim_id,
+                        occurred_at AS queued_at,
+                        COALESCE(NULLIF(TRIM(COALESCE(event_payload->>'verifai_case_id', '')), ''), '') AS verifai_case_id,
+                        COALESCE(NULLIF(TRIM(COALESCE(event_payload->>'verifai_status', '')), ''), '') AS verifai_status,
+                        COALESCE(NULLIF(TRIM(COALESCE(event_payload->>'verifai_stage', '')), ''), '') AS verifai_stage
+                    FROM workflow_events
+                    WHERE event_type = 'verifai_claim_queued'
+                    ORDER BY claim_id, occurred_at DESC
+                ),
+                legacy_data AS (
+                    SELECT claim_id, legacy_payload
+                    FROM claim_legacy_data
+                )
+                SELECT
+                    c.id,
+                    c.external_claim_id,
+                    c.assigned_doctor_id,
+                    c.tags,
+                    c.status,
+                    CASE
+                        WHEN c.status = 'waiting_for_documents' AND COALESCE(ds.documents, 0) > 0 THEN 'pending'
+                        ELSE c.status::text
+                    END AS status_display,
+                    la.assigned_at,
+                    la.allotment_date,
+                    COALESCE(ds.documents, 0) AS documents,
+                    COALESCE(ds.source_files, 0) AS source_files,
+                    ds.last_upload,
+                    COALESCE(ds.last_uploaded_by, '') AS last_uploaded_by,
+                    COALESCE(NULLIF(TRIM(ld.explanation_summary), ''), COALESCE(ld.recommendation::text, 'Pending')) AS final_status,
+                    COALESCE(
+                        NULLIF(TRIM(COALESCE(ldata.legacy_payload->>'doa_date', '')), ''),
+                        NULLIF(TRIM(COALESCE(ldata.legacy_payload->>'doa', '')), ''),
+                        NULLIF(TRIM(COALESCE(ldata.legacy_payload->>'doa date', '')), ''),
+                        NULLIF(TRIM(COALESCE(ldata.legacy_payload->>'date_of_admission', '')), ''),
+                        NULLIF(TRIM(COALESCE(ldata.legacy_payload->>'date of admission', '')), ''),
+                        NULLIF(TRIM(COALESCE(ldata.legacy_payload->>'admission_date', '')), ''),
+                        NULLIF(TRIM(COALESCE(ldata.legacy_payload->>'admission date', '')), '')
+                    ) AS doa_date,
+                    COALESCE(
+                        NULLIF(TRIM(COALESCE(ldata.legacy_payload->>'dod_date', '')), ''),
+                        NULLIF(TRIM(COALESCE(ldata.legacy_payload->>'dod', '')), ''),
+                        NULLIF(TRIM(COALESCE(ldata.legacy_payload->>'dod date', '')), ''),
+                        NULLIF(TRIM(COALESCE(ldata.legacy_payload->>'date_of_discharge', '')), ''),
+                        NULLIF(TRIM(COALESCE(ldata.legacy_payload->>'date of discharge', '')), ''),
+                        NULLIF(TRIM(COALESCE(ldata.legacy_payload->>'discharge_date', '')), ''),
+                        NULLIF(TRIM(COALESCE(ldata.legacy_payload->>'discharge date', '')), '')
+                    ) AS dod_date,
+                    COALESCE(al.learning_note, '') AS auditor_learning,
+                    COALESCE(lsb.send_back_reason, '') AS send_back_reason,
+                    lvq.queued_at AS verifai_queued_at,
+                    COALESCE(lvq.verifai_case_id, '') AS verifai_case_id,
+                    COALESCE(lvq.verifai_status, '') AS verifai_status,
+                    COALESCE(lvq.verifai_stage, '') AS verifai_stage,
+                    ldata.legacy_payload AS legacy_payload
+                FROM claims c
+                LEFT JOIN latest_assignment la ON la.claim_id = c.id
+                LEFT JOIN doc_stats ds ON ds.claim_id = c.id
+                LEFT JOIN latest_report rv ON rv.claim_id = c.id
+                LEFT JOIN upload_meta um ON um.claim_id = c.id
+                LEFT JOIN latest_decision ld ON ld.claim_id = c.id
+                LEFT JOIN latest_auditor_learning al ON al.claim_id = c.id
+                LEFT JOIN latest_send_back lsb ON lsb.claim_id = c.id
+                LEFT JOIN latest_verifai_queue lvq ON lvq.claim_id = c.id
+                LEFT JOIN legacy_data ldata ON ldata.claim_id = c.id
+                {where_sql}
+                ORDER BY COALESCE(la.allotment_date, DATE(c.updated_at)) {order_sql}, c.updated_at {order_sql}
+                LIMIT :limit OFFSET :offset
+                """
+            ),
+            params,
+        ).mappings().all()
 
-            for claim_key in claim_ids:
-                handwriting_by_claim[claim_key] = _summarize_claim_handwriting(docs_by_claim.get(claim_key, []))
-        except Exception as exc:
-            logger.exception("Handwriting analysis computation failed in claim-document-status: %s", exc)
-
-    empty_handwriting = _summarize_claim_handwriting([])
-
-    def _legacy_text(payload_obj: Any, *keys: str) -> str:
-        if not isinstance(payload_obj, dict):
-            return ""
-        for key in keys:
-            value = payload_obj.get(key)
-            if value is None:
-                continue
-            text_value = str(value).strip()
-            if text_value:
-                return text_value
-        return ""
-
-    def _tag_at(tags_value: Any, idx: int) -> str:
-        if isinstance(tags_value, list) and 0 <= idx < len(tags_value):
-            return str(tags_value[idx] or "").strip()
-        if isinstance(tags_value, str):
+        claim_ids = [str(r.get("id") or "").strip() for r in rows if str(r.get("id") or "").strip()]
+        handwriting_by_claim: dict[str, dict[str, Any]] = {}
+        if claim_ids:
             try:
-                parsed = json.loads(tags_value)
-            except Exception:
-                parsed = None
-            if isinstance(parsed, list) and 0 <= idx < len(parsed):
-                return str(parsed[idx] or "").strip()
-        return ""
+                doc_rows = db.execute(
+                    text(
+                        """
+                        SELECT
+                            cd.claim_id,
+                            cd.id AS document_id,
+                            COALESCE(cd.file_name, '') AS file_name,
+                            de.extracted_entities
+                        FROM claim_documents cd
+                        LEFT JOIN LATERAL (
+                            SELECT dex.extracted_entities
+                            FROM document_extractions dex
+                            WHERE dex.document_id = cd.id
+                            ORDER BY dex.created_at DESC
+                            LIMIT 1
+                        ) de ON TRUE
+                        WHERE CAST(cd.claim_id AS TEXT) IN :claim_ids
+                        """
+                    ).bindparams(bindparam("claim_ids", expanding=True)),
+                    {"claim_ids": claim_ids},
+                ).mappings().all()
 
-    items = []
-    for r in rows:
-        legacy_payload = r.get("legacy_payload") if isinstance(r.get("legacy_payload"), dict) else {}
-        tags_value = r.get("tags")
-        claim_type = (
-            _legacy_text(legacy_payload, "claim_type", "claim type", "case_type", "case type")
-            or _tag_at(tags_value, 0)
-        )
-        treatment_type = (
-            _legacy_text(legacy_payload, "treatment_type", "treatment type", "treatment-type")
-            or _tag_at(tags_value, 4)
-        )
-        external_claim_id = str(r.get("external_claim_id") or "")
-        handwriting_payload = handwriting_by_claim.get(str(r.get("id") or ""), empty_handwriting)
-        handwriting_payload = _apply_manual_handwriting_override(external_claim_id, handwriting_payload)
-        verifai_case_id = str(r.get("verifai_case_id") or "")
-        verifai_status = str(r.get("verifai_status") or "")
-        verifai_stage = str(r.get("verifai_stage") or "")
-        verifai_json_received, verifai_json_state = _derive_verifai_json_state(
-            verifai_case_id,
-            verifai_status,
-            verifai_stage,
-        )
-        items.append(
-            {
-                "id": str(r["id"]),
-                "external_claim_id": external_claim_id,
-                "assigned_doctor_id": str(r.get("assigned_doctor_id") or ""),
-                "status": str(r.get("status") or ""),
-                "status_display": str(r.get("status_display") or ""),
-                "assigned_at": str(r.get("assigned_at") or ""),
-                "allotment_date": str(r.get("allotment_date") or ""),
-                "documents": int(r.get("documents") or 0),
-                "source_files": int(r.get("source_files") or 0),
-                "last_upload": str(r.get("last_upload") or ""),
-                "last_uploaded_by": str(r.get("last_uploaded_by") or ""),
-                "final_status": str(r.get("final_status") or "Pending"),
-                "doa_date": str(r.get("doa_date") or ""),
-                "dod_date": str(r.get("dod_date") or ""),
-                "auditor_learning": str(r.get("auditor_learning") or ""),
-                "send_back_reason": str(r.get("send_back_reason") or ""),
-                "verifai_case_id": verifai_case_id,
-                "verifai_status": verifai_status,
-                "verifai_stage": verifai_stage,
-                "verifai_queued_at": str(r.get("verifai_queued_at") or ""),
-                "verifai_queued": bool(verifai_case_id.strip()),
-                "verifai_json_received": bool(verifai_json_received),
-                "verifai_json_state": verifai_json_state,
-                "claim_type": claim_type,
-                "treatment_type": treatment_type,
-                "handwriting_analysis": handwriting_payload,
-                "legacy_payload": legacy_payload,
-            }
-        )
+                docs_by_claim: dict[str, list[dict[str, Any]]] = {}
+                for d in doc_rows:
+                    claim_key = str(d.get("claim_id") or "").strip()
+                    if not claim_key:
+                        continue
+                    docs_by_claim.setdefault(claim_key, []).append(dict(d))
 
-    return {"total": int(total or 0), "items": items}
+                for claim_key in claim_ids:
+                    handwriting_by_claim[claim_key] = _summarize_claim_handwriting(docs_by_claim.get(claim_key, []))
+            except Exception as exc:
+                logger.exception("Handwriting analysis computation failed in claim-document-status: %s", exc)
+
+        empty_handwriting = _summarize_claim_handwriting([])
+
+        def _legacy_text(payload_obj: Any, *keys: str) -> str:
+            if not isinstance(payload_obj, dict):
+                return ""
+            for key in keys:
+                value = payload_obj.get(key)
+                if value is None:
+                    continue
+                text_value = str(value).strip()
+                if text_value:
+                    return text_value
+            return ""
+
+        def _tag_at(tags_value: Any, idx: int) -> str:
+            if isinstance(tags_value, list) and 0 <= idx < len(tags_value):
+                return str(tags_value[idx] or "").strip()
+            if isinstance(tags_value, str):
+                try:
+                    parsed = json.loads(tags_value)
+                except Exception:
+                    parsed = None
+                if isinstance(parsed, list) and 0 <= idx < len(parsed):
+                    return str(parsed[idx] or "").strip()
+            return ""
+
+        items = []
+        for r in rows:
+            legacy_payload = r.get("legacy_payload") if isinstance(r.get("legacy_payload"), dict) else {}
+            tags_value = r.get("tags")
+            claim_type = (
+                _legacy_text(legacy_payload, "claim_type", "claim type", "case_type", "case type")
+                or _tag_at(tags_value, 0)
+            )
+            treatment_type = (
+                _legacy_text(legacy_payload, "treatment_type", "treatment type", "treatment-type")
+                or _tag_at(tags_value, 4)
+            )
+            external_claim_id = str(r.get("external_claim_id") or "")
+            handwriting_payload = handwriting_by_claim.get(str(r.get("id") or ""), empty_handwriting)
+            handwriting_payload = _apply_manual_handwriting_override(external_claim_id, handwriting_payload)
+            verifai_case_id = str(r.get("verifai_case_id") or "")
+            verifai_status = str(r.get("verifai_status") or "")
+            verifai_stage = str(r.get("verifai_stage") or "")
+            verifai_json_received, verifai_json_state = _derive_verifai_json_state(
+                verifai_case_id,
+                verifai_status,
+                verifai_stage,
+            )
+            items.append(
+                {
+                    "id": str(r["id"]),
+                    "external_claim_id": external_claim_id,
+                    "assigned_doctor_id": str(r.get("assigned_doctor_id") or ""),
+                    "status": str(r.get("status") or ""),
+                    "status_display": str(r.get("status_display") or ""),
+                    "assigned_at": str(r.get("assigned_at") or ""),
+                    "allotment_date": str(r.get("allotment_date") or ""),
+                    "documents": int(r.get("documents") or 0),
+                    "source_files": int(r.get("source_files") or 0),
+                    "last_upload": str(r.get("last_upload") or ""),
+                    "last_uploaded_by": str(r.get("last_uploaded_by") or ""),
+                    "final_status": str(r.get("final_status") or "Pending"),
+                    "doa_date": str(r.get("doa_date") or ""),
+                    "dod_date": str(r.get("dod_date") or ""),
+                    "auditor_learning": str(r.get("auditor_learning") or ""),
+                    "send_back_reason": str(r.get("send_back_reason") or ""),
+                    "verifai_case_id": verifai_case_id,
+                    "verifai_status": verifai_status,
+                    "verifai_stage": verifai_stage,
+                    "verifai_queued_at": str(r.get("verifai_queued_at") or ""),
+                    "verifai_queued": bool(verifai_case_id.strip()),
+                    "verifai_json_received": bool(verifai_json_received),
+                    "verifai_json_state": verifai_json_state,
+                    "claim_type": claim_type,
+                    "treatment_type": treatment_type,
+                    "handwriting_analysis": handwriting_payload,
+                    "legacy_payload": legacy_payload,
+                }
+            )
+
+        return {"total": int(total or 0), "items": items}
 @router.get("/export-full-data")
 def export_full_data(
     from_date: str | None = Query(default=None),

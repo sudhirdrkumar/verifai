@@ -36,6 +36,7 @@ from app.services.auth_service import (
     list_users,
     revoke_session,
 )
+from app.utils.db_utils import get_db_context
 router = APIRouter(prefix="/auth", tags=["auth"])
 _GSTIN_RE = re.compile(r"^[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z][A-Z0-9]Z[A-Z0-9]$")
 _PHARMACY_HINTS = (
@@ -299,27 +300,27 @@ def _verify_gstin_with_cleartax(gstin: str, captcha_token: str | None = None) ->
 def login_endpoint(
     payload: LoginRequest,
     request: Request,
-    db: Session = Depends(get_db),
 ) -> LoginResponse:
-    ip_address = request.client.host if request.client else "unknown"
-    user_agent = request.headers.get("user-agent", "unknown")
+    with get_db_context() as db:
+        ip_address = request.client.host if request.client else "unknown"
+        user_agent = request.headers.get("user-agent", "unknown")
 
-    try:
-        user, token, expires_at = authenticate_and_create_session(
-            db=db,
-            username=payload.username,
-            password=payload.password,
-            ip_address=ip_address,
-            user_agent=user_agent,
+        try:
+            user, token, expires_at = authenticate_and_create_session(
+                db=db,
+                username=payload.username,
+                password=payload.password,
+                ip_address=ip_address,
+                user_agent=user_agent,
+            )
+        except AuthenticationError as exc:
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=str(exc)) from exc
+
+        return LoginResponse(
+            access_token=token,
+            expires_at=expires_at,
+            user=user.as_response(),
         )
-    except AuthenticationError as exc:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=str(exc)) from exc
-
-    return LoginResponse(
-        access_token=token,
-        expires_at=expires_at,
-        user=user.as_response(),
-    )
 
 
 @router.post("/logout", response_model=LogoutResponse)
