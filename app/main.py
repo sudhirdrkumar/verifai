@@ -9,6 +9,7 @@ from app.core.config import settings
 from app.db.migrations import run_pending_migrations
 from app.middleware.request_monitoring import RequestMonitoringMiddleware, TransactionGuardMiddleware
 from app.services.medicine_rectify_scheduler import medicine_rectify_scheduler
+from app.services.folder_sync_scheduler import folder_sync_scheduler
 
 app = FastAPI(title=settings.app_name)
 
@@ -31,11 +32,13 @@ app.mount("/qc/public", StaticFiles(directory=str(QC_WEB_ROOT / "public")), name
 async def on_startup() -> None:
     run_pending_migrations()
     medicine_rectify_scheduler.start()
+    await folder_sync_scheduler.start()
 
 
 @app.on_event("shutdown")
 async def on_shutdown() -> None:
     await medicine_rectify_scheduler.stop()
+    await folder_sync_scheduler.stop()
 
 
 @app.get("/")

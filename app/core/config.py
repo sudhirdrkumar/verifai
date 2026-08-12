@@ -254,6 +254,19 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("MEDICINE_RECTIFY_TIMEOUT_SECONDS"),
     )
 
+    folder_sync_path: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("FOLDER_SYNC_PATH"),
+    )
+    folder_sync_interval_minutes: int = Field(
+        default=5,
+        validation_alias=AliasChoices("FOLDER_SYNC_INTERVAL_MINUTES"),
+    )
+    folder_sync_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("FOLDER_SYNC_ENABLED"),
+    )
+
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",
