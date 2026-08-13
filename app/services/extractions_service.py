@@ -575,85 +575,25 @@ def run_s3_openai_pipeline(
 ) -> dict[str, Any]:
     """
     Phase 2 — No DB: Extract from S3.
-    Hybrid approach:
-    - OpenAI/auto: Try S3-direct extraction first for PDFs/images.
-    - Fallback: AWS Textract for better structured data extraction.
-    - Last resort: Local extraction if Textract fails.
+    Direct OpenAI path for PDFs/images.
+    Fallback to AWS Textract only when OpenAI cannot complete.
+    OCR is left to the lowest-level local fallback path.
     """
-    from app.services.extraction_s3_direct import extract_via_s3_presigned_url, S3DirectExtractionError
-
-    safe_mime = str(mime_type or "application/pdf").strip().lower()
-    is_image = safe_mime.startswith("image/")
-    is_pdf = safe_mime == "application/pdf" or str(file_name or "").lower().endswith(".pdf")
-
-    logger.info(f"HYBRID_EXTRACTION_START: file_name={file_name}, raw_mime_type={mime_type}, safe_mime={safe_mime}, is_image={is_image}, provider={provider.value}")
-
-    if (is_image or is_pdf) and provider in (ExtractionProvider.openai, ExtractionProvider.auto):
-        logger.info(f"🚀 TRYING S3-DIRECT for {file_name} with provider={provider.value}")
-        try:
-            result = extract_via_s3_presigned_url(
-                s3_bucket=s3_bucket or settings.s3_bucket,
-                storage_key=storage_key,
-                document_name=file_name,
-                mime_type=mime_type,
-            )
-
-            # Check if extraction has critical data
-            entities = result.get("extracted_entities", {})
-            has_investigations = bool(entities.get("all_investigation_reports_with_values") or entities.get("deranged_investigation_reports"))
-            has_tpr = bool(entities.get("daily_tpr_chart_min_max"))
-            has_medicines = bool(entities.get("medicine_used"))
-            has_diagnosis = bool(entities.get("diagnosis"))
-            has_clinical = bool(entities.get("clinical_findings"))
-
-            # Check for corrupted/garbled text in medicine field
-            medicine_str = str(entities.get("medicine_used", ""))
-            medicine_corrupted = has_medicines and (
-                len(medicine_str) > 500 or
-                "mojalla" in medicine_str.lower() or
-                "dharuwa" in medicine_str.lower() or
-                "hazipur" in medicine_str.lower() or
-                "enclave" in medicine_str.lower()
-            )
-
-            logger.info(f"S3_EXTRACTION_CHECK: {file_name}, has_diagnosis={has_diagnosis}, has_investigations={has_investigations}, has_tpr={has_tpr}, has_medicines={has_medicines}, medicine_corrupted={medicine_corrupted}, has_clinical={has_clinical}")
-
-            # Critical fields needed for complete extraction
-            missing_investigations = not has_investigations
-            missing_tpr = not has_tpr
-            missing_medicines = not has_medicines
-
-            # If ANY critical field is missing OR data is corrupted, use AWS Textract
-            if missing_investigations or missing_tpr or missing_medicines or medicine_corrupted:
-                logger.warning(f"S3-direct incomplete/corrupted: investigations={has_investigations}, tpr={has_tpr}, medicines={has_medicines}, corrupted={medicine_corrupted}. Falling back to AWS Textract.")
-                # Fall through to AWS Textract for better structured extraction
-            else:
-                return result
-
-        except S3DirectExtractionError as e:
-            logger.warning(f"S3-direct extraction failed: {e}. Falling back to AWS Textract for {file_name}")
-            # Fall through to AWS Textract
-
-    # Fallback extraction order: OpenAI (best context) → Textract (structured) → Local OCR (last resort)
-    logger.info(f"🔄 FALLING BACK from S3-direct for {file_name}")
     file_bytes = download_bytes(storage_key)
-
-    # Check if PDF needs splitting (too large for OpenAI)
-    from app.services.extraction_s3_direct import _split_large_pdf
     safe_mime = str(mime_type or "application/pdf").strip().lower()
     is_pdf = safe_mime == "application/pdf" or str(file_name or "").lower().endswith(".pdf")
 
-    if is_pdf and len(file_bytes) > 5_000_000:  # >5MB, likely large PDF
-        logger.info(f"🔄 PDF is large ({len(file_bytes)} bytes), attempting to split for extraction")
-        chunks = _split_large_pdf(file_bytes, max_pages=90)
-        if len(chunks) > 1:
-            logger.info(f"🔄 Split into {len(chunks)} chunks, extracting first chunk with OpenAI")
-            file_bytes = chunks[0]  # Process first chunk first
+    logger.info(
+        "DIRECT_EXTRACTION_START: file_name=%s raw_mime_type=%s safe_mime=%s provider=%s bytes=%s",
+        file_name,
+        mime_type,
+        safe_mime,
+        provider.value,
+        len(file_bytes),
+    )
 
-    # Try 1: OpenAI with local file (better at understanding context, filtering noise)
-    logger.info(f"🔄 TRY 1: OpenAI with local file for {file_name}")
     try:
-        openai_result = run_extraction(
+        return run_extraction(
             provider=ExtractionProvider.openai,
             document_name=file_name,
             mime_type=mime_type,
@@ -661,16 +601,11 @@ def run_s3_openai_pipeline(
             storage_key=storage_key or None,
             s3_bucket=s3_bucket,
         )
-        logger.info(f"✅ TRY 1 SUCCESS: OpenAI extraction for {file_name}")
-        entities = openai_result.get("extracted_entities", {})
-        logger.info(f"🎯 HYBRID_EXTRACTION_FINAL: file_name={file_name}, method={openai_result.get('provider', 'unknown')}, has_investigations={bool(entities.get('all_investigation_reports_with_values'))}, has_tpr={bool(entities.get('daily_tpr_chart_min_max'))}, has_medicines={bool(entities.get('medicine_used'))}")
-        return openai_result
     except Exception as openai_err:
-        logger.warning(f"❌ TRY 1 FAILED: OpenAI failed for {file_name}: {openai_err}. Trying AWS Textract.")
+        logger.warning("Direct OpenAI extraction failed for %s: %s", file_name, openai_err)
 
-    # Try 2: AWS Textract for structured data extraction
     try:
-        textract_result = run_extraction(
+        return run_extraction(
             provider=ExtractionProvider.aws_textract,
             document_name=file_name,
             mime_type=mime_type,
@@ -678,26 +613,18 @@ def run_s3_openai_pipeline(
             storage_key=storage_key or None,
             s3_bucket=s3_bucket,
         )
-        logger.info(f"AWS Textract extraction succeeded for {file_name}")
-        entities = textract_result.get("extracted_entities", {})
-        logger.info(f"HYBRID_EXTRACTION_FINAL: file_name={file_name}, method={textract_result.get('provider', 'unknown')}, has_investigations={bool(entities.get('all_investigation_reports_with_values'))}, has_tpr={bool(entities.get('daily_tpr_chart_min_max'))}, has_medicines={bool(entities.get('medicine_used'))}")
-        return textract_result
     except Exception as textract_err:
-        logger.warning(f"AWS Textract failed for {file_name}: {textract_err}. Falling back to local extraction.")
+        logger.warning("AWS Textract extraction failed for %s: %s", file_name, textract_err)
 
-    # Try 3: Local OCR extraction (last resort)
-    logger.info(f"Using local extraction (last resort) for {file_name}")
-    result = run_extraction(
-        provider=provider,
+    logger.info("Using local extraction fallback for %s", file_name)
+    return run_extraction(
+        provider=ExtractionProvider.local,
         document_name=file_name,
         mime_type=mime_type,
         payload=file_bytes,
         storage_key=storage_key or None,
         s3_bucket=s3_bucket,
     )
-    entities = result.get("extracted_entities", {})
-    logger.info(f"HYBRID_EXTRACTION_FINAL: file_name={file_name}, method={result.get('provider', 'unknown')}, has_investigations={bool(entities.get('all_investigation_reports_with_values'))}, has_tpr={bool(entities.get('daily_tpr_chart_min_max'))}, has_medicines={bool(entities.get('medicine_used'))}")
-    return result
 
 
 def _pipeline_save_result(
