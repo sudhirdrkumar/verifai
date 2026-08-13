@@ -1454,6 +1454,64 @@ def _extract_text_with_textract(
 
     return extracted_text, response if isinstance(response, dict) else {}
 
+def _parse_investigations_from_text(text: str) -> list[dict]:
+    """Extract investigation reports from Textract text."""
+    investigations = []
+    # Match patterns like "Test Name: value", "Lab: value", etc.
+    patterns = [
+        r"(?:investigation|lab|test|report)[\s:]*([A-Za-z\s]+?)[\s:]*([0-9.]+[\s\w%]*)",
+        r"(?:blood|culture|xray|ct|mri|ultrasound)[\s:]*([^\n]+?)(?:[\n]|$)",
+        r"(?:wbc|rbc|hemoglobin|platelet|glucose)[\s:]*([0-9.]+[\s\w/]+)",
+    ]
+
+    for pattern in patterns:
+        matches = re.finditer(pattern, text, re.I)
+        for match in matches:
+            if match.groups():
+                investigations.append({
+                    "test_name": str(match.group(1) if len(match.groups()) > 0 else "").strip()[:100],
+                    "value": str(match.group(2) if len(match.groups()) > 1 else "").strip()[:100],
+                })
+
+    return investigations[:10] if investigations else []
+
+
+def _parse_tpr_from_text(text: str) -> str:
+    """Extract TPR (Temperature/Pulse/Respiration) chart data from text."""
+    tpr_patterns = [
+        r"(?:tpr|temperature|pulse|blood pressure|bp|vitals?)[\s:]*([0-9.]+[\s/\-\w°C°F]*)",
+        r"(?:temp|t:)[\s]*([0-9.]+[\s°C°F]*)",
+        r"(?:pulse|p:)[\s]*([0-9]+[\s\w/]*)",
+        r"(?:bp|blood.?pressure)[\s]*([0-9]+/[0-9]+[\s\w]*)",
+    ]
+
+    tpr_values = []
+    for pattern in tpr_patterns:
+        matches = re.finditer(pattern, text, re.I)
+        for match in matches:
+            tpr_values.append(match.group(1).strip())
+
+    return " | ".join(tpr_values[:5]) if tpr_values else ""
+
+
+def _parse_medicines_from_text(text: str) -> str:
+    """Extract medicine/medication list from text."""
+    medicine_patterns = [
+        r"(?:medicine|medication|drug|prescribed)[\s:]*([A-Za-z\s\-,0-9]*?)(?=[\n]|$)",
+        r"(?:tab\.?|inj\.?|syrup|cream|ointment)\s+([A-Za-z\d\-\s]+?)[\s]*(?:×|x|-)\s*([0-9]+[\s\w]*)",
+    ]
+
+    medicines = []
+    for pattern in medicine_patterns:
+        matches = re.finditer(pattern, text, re.I)
+        for match in matches:
+            med_text = " ".join([g for g in match.groups() if g])
+            if med_text.strip() and len(med_text) < 200:
+                medicines.append(med_text.strip())
+
+    return " | ".join(medicines[:10]) if medicines else ""
+
+
 def _extract_aws_textract(
     document_name: str,
     mime_type: str,
@@ -1475,6 +1533,11 @@ def _extract_aws_textract(
     patient_match = re.search(r"(?:patient\s*(?:name)?\s*[:#-]?\s*)([A-Za-z .'-]{3,80})", extracted_text, re.I)
     diagnosis_match = re.search(r"(?:diagnosis\s*[:#-]?\s*)([^\n\r]{3,140})", extracted_text, re.I)
 
+    # Parse investigation, TPR, and medicine data from extracted text
+    investigations = _parse_investigations_from_text(extracted_text)
+    tpr_data = _parse_tpr_from_text(extracted_text)
+    medicines = _parse_medicines_from_text(extracted_text)
+
     entities = {
         "document_name": document_name,
         "mime_type": mime_type,
@@ -1483,6 +1546,9 @@ def _extract_aws_textract(
         "patient_name": patient_match.group(1).strip() if patient_match else None,
         "diagnosis": diagnosis_match.group(1).strip() if diagnosis_match else None,
         "text_preview": preview,
+        "all_investigation_reports_with_values": investigations,
+        "daily_tpr_chart_min_max": tpr_data,
+        "medicine_used": medicines,
     }
 
     evidence: list[dict[str, Any]] = []
@@ -1884,6 +1950,22 @@ def _extract_openai(
     confidence = parsed.get("confidence") if isinstance(parsed, dict) else None
 
     entities = _normalize_extracted_entities(entities, text or model_output_text)
+
+    # Add parsed investigation/TPR/medicine data if not already in entities
+    if not entities.get("all_investigation_reports_with_values"):
+        investigations = _parse_investigations_from_text(text or model_output_text)
+        if investigations:
+            entities["all_investigation_reports_with_values"] = investigations
+
+    if not entities.get("daily_tpr_chart_min_max"):
+        tpr_data = _parse_tpr_from_text(text or model_output_text)
+        if tpr_data:
+            entities["daily_tpr_chart_min_max"] = tpr_data
+
+    if not entities.get("medicine_used"):
+        medicines = _parse_medicines_from_text(text or model_output_text)
+        if medicines:
+            entities["medicine_used"] = medicines
 
     if confidence is not None:
         try:
