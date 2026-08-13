@@ -5060,6 +5060,22 @@
 
     function mergeExtractionResultsForReport(results) {
       const items = Array.isArray(results) ? results : [];
+
+      // Format investigation array data properly for report rendering
+      var investigationText = '';
+      if (items.length > 0 && items[0] && items[0].extracted_entities) {
+        const ent = items[0].extracted_entities;
+        if (Array.isArray(ent.all_investigation_reports_with_values) && ent.all_investigation_reports_with_values.length > 0) {
+          investigationText = ent.all_investigation_reports_with_values.map(function(item) {
+            if (typeof item === 'object') {
+              return (item.test_name || '') + ' | Value: ' + (item.value || '') + ' | Range: ' + (item.reference_range || '');
+            }
+            return String(item);
+          }).join('\n');
+          console.log('📊 FORMATTED_INVESTIGATIONS: ' + investigationText.substring(0, 200));
+        }
+      }
+
       const patientName = pickEntityValueFromResults(items, ['patient_name', 'insured_name', 'name', 'beneficiary_name'], function (value) {
         return !isLikelyOrgName(value);
       });
@@ -5117,7 +5133,7 @@
         chief_complaints_at_admission: mergedComplaints,
         findings: findingsParts.join('\n'),
         medicine_used: pickEntityValueFromResults(items, ['medicine_used', 'medicines', 'medications', 'treatment_medicines', 'prescription']),
-        investigation_finding_in_details: pickEntityValueFromResults(items, ['all_investigation_reports_with_values', 'all_investigation_report_lines', 'investigation_finding_in_details', 'investigations', 'lab_results', 'test_results']),
+        investigation_finding_in_details: investigationText || pickEntityValueFromResults(items, ['all_investigation_reports_with_values', 'all_investigation_report_lines', 'investigation_finding_in_details', 'investigations', 'lab_results', 'test_results']),
         claim_amount: pickEntityValueFromResults(items, ['claim_amount', 'claimed_amount', 'bill_amount', 'total_amount']),
         clinical_justification: pickEntityValueFromResults(items, ['clinical_justification', 'justification']),
         conclusion: pickEntityValueFromResults(items, ['detailed_conclusion', 'conclusion'], function (value) {
