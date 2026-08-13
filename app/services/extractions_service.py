@@ -590,12 +590,26 @@ def run_s3_openai_pipeline(
     if (is_image or is_pdf) and provider in (ExtractionProvider.openai, ExtractionProvider.auto):
         logger.info(f"Using S3-direct extraction for {file_name} with provider={provider.value}")
         try:
-            return extract_via_s3_presigned_url(
+            result = extract_via_s3_presigned_url(
                 s3_bucket=s3_bucket or settings.s3_bucket,
                 storage_key=storage_key,
                 document_name=file_name,
                 mime_type=mime_type,
             )
+
+            # Check if extraction has critical data
+            entities = result.get("extracted_entities", {})
+            has_investigations = bool(entities.get("all_investigation_reports_with_values") or entities.get("deranged_investigation_reports"))
+            has_tpr = bool(entities.get("daily_tpr_chart_min_max"))
+            has_medicines = bool(entities.get("medicine_used"))
+
+            # If critical fields are missing, this might be an image PDF needing OCR
+            if not has_investigations and not has_tpr and not has_medicines:
+                logger.warning(f"S3-direct extraction missing critical fields for {file_name}. Trying local extraction.")
+                # Fall through to local extraction for better OCR handling
+            else:
+                return result
+
         except S3DirectExtractionError as e:
             logger.warning(f"S3-direct extraction failed: {e}. Falling back to local extraction for {file_name}")
             # Fall through to local extraction only if S3-direct fails

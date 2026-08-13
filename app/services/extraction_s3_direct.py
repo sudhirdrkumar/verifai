@@ -107,6 +107,8 @@ def _call_openai_with_s3_url(
     # Build user content with S3 URL instead of embedded file
     user_prompt = (
         "Extract structured data from this medical claim document for a health-claim assessment sheet. Return strict JSON only.\n"
+        "CRITICAL: Extract ALL investigation reports, TPR/vitals data, and medicine list if present in document.\n"
+        "If investigation/TPR/medicines not found, set to empty array/string (not null).\n"
         "Keep complaints, diagnosis, clinical findings, investigations, TPR/vitals, medicines, and conclusion fields separate.\n"
         "Do not put patient name as hospital/vendor/doctor. Use '-' for unknown values.\n\n"
         "JSON schema:\n"
@@ -200,9 +202,15 @@ def _call_openai_with_s3_url(
         model_output = result.get("choices", [{}])[0].get("message", {}).get("content", "")
         extracted = _parse_json_entities(model_output)
 
-        logger.info(f"S3DIRECT_OPENAI_RESPONSE: document={safe_name}, model_output_length={len(model_output)}, extracted_keys={list(extracted.keys()) if extracted else 'EMPTY'}")
-        if not extracted or not any(extracted.values()):
-            logger.warning(f"S3DIRECT_EMPTY_EXTRACTION: document={safe_name}, raw_response={model_output[:500]}")
+        # Check for critical missing fields
+        entities = extracted.get("extracted_entities", {}) if isinstance(extracted, dict) else {}
+        has_investigations = bool(entities.get("all_investigation_reports_with_values") or entities.get("deranged_investigation_reports"))
+        has_tpr = bool(entities.get("daily_tpr_chart_min_max"))
+        has_medicines = bool(entities.get("medicine_used"))
+
+        logger.info(f"S3DIRECT_EXTRACTION_REPORT: document={safe_name}, has_investigations={has_investigations}, has_tpr={has_tpr}, has_medicines={has_medicines}")
+        if not has_investigations or not has_tpr or not has_medicines:
+            logger.warning(f"S3DIRECT_MISSING_CRITICAL_FIELDS: document={safe_name}, raw_length={len(model_output)}, first_500_chars={model_output[:500]}")
 
         return {
             "provider": "openai-s3-direct",
