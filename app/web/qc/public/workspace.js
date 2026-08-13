@@ -5146,6 +5146,15 @@
         }
       }
       if (extractionResults.length > 0) {
+        // DEBUG: Check what extraction data we have
+        extractionResults.forEach(function(result, idx) {
+          if (result && result.extracted_entities) {
+            const ent = result.extracted_entities;
+            console.log('🔍 LOAD_EXTRACTION[' + idx + ']: investigations=' + (Array.isArray(ent.all_investigation_reports_with_values) ? ent.all_investigation_reports_with_values.length : (ent.all_investigation_reports_with_values ? 'string' : 'EMPTY')) +
+              ', tpr=' + (ent.daily_tpr_chart_min_max ? 'YES' : 'NO') +
+              ', medicines=' + (ent.medicine_used ? 'YES' : 'NO'));
+          }
+        });
         currentVerifaiReport = {
           ...(currentVerifaiReport || {}),
           verifai_status: 'processed',
