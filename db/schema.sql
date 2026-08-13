@@ -1,4 +1,4 @@
-﻿-- QC-BKP modernized PostgreSQL schema
+-- QC-BKP modernized PostgreSQL schema
 -- Based on QC-BKP_Modernization_Blueprint.pdf
 
 CREATE EXTENSION IF NOT EXISTS pgcrypto;
