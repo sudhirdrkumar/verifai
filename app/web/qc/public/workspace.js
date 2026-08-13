@@ -5918,6 +5918,26 @@
             console.log('Force extraction result:', result);
             console.log('Extracted entities:', result && result.extracted_entities ? result.extracted_entities : 'NONE');
             syncVerifaiReportFromExtraction(result);
+
+            // CRITICAL: Merge extracted investigations, TPR, and medicines into report
+            if (result && result.extracted_entities) {
+              const entities = result.extracted_entities;
+              if (currentChecklistLatest) {
+                if (entities.all_investigation_reports_with_values) {
+                  currentChecklistLatest.investigation_finding_in_details = Array.isArray(entities.all_investigation_reports_with_values)
+                    ? entities.all_investigation_reports_with_values.map(function(item) { return typeof item === 'string' ? item : (item.test_name || '') + ' : ' + (item.value || ''); }).join('\n')
+                    : String(entities.all_investigation_reports_with_values);
+                }
+                if (entities.daily_tpr_chart_min_max) {
+                  currentChecklistLatest.tpr_chart = String(entities.daily_tpr_chart_min_max);
+                }
+                if (entities.medicine_used) {
+                  currentChecklistLatest.treatment_medicines = String(entities.medicine_used);
+                }
+              }
+              console.log('✅ Merged extraction data into report: investigations, TPR, medicines');
+            }
+
             if (progressBar) progressBar.style.width = '100%';
             if (progressStatus) progressStatus.textContent = 'Re-extraction completed! Displaying data...';
             setMessage('case-detail-msg', 'ok', 'Document re-extracted successfully. Data extracted below.');
