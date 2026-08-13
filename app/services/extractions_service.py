@@ -618,13 +618,15 @@ def run_s3_openai_pipeline(
 
             logger.info(f"S3_EXTRACTION_CHECK: {file_name}, has_diagnosis={has_diagnosis}, has_investigations={has_investigations}, has_tpr={has_tpr}, has_medicines={has_medicines}, medicine_corrupted={medicine_corrupted}, has_clinical={has_clinical}")
 
-            # If critical fields are empty or corrupted, use AWS Textract for better structured extraction
-            if not (has_investigations or has_tpr or has_medicines or has_clinical) or medicine_corrupted:
-                logger.warning(f"S3-direct extraction returned incomplete/corrupted data for {file_name}. Falling back to AWS Textract.")
+            # Critical fields needed for complete extraction
+            missing_investigations = not has_investigations
+            missing_tpr = not has_tpr
+            missing_medicines = not has_medicines
+
+            # If ANY critical field is missing OR data is corrupted, use AWS Textract
+            if missing_investigations or missing_tpr or missing_medicines or medicine_corrupted:
+                logger.warning(f"S3-direct incomplete/corrupted: investigations={has_investigations}, tpr={has_tpr}, medicines={has_medicines}, corrupted={medicine_corrupted}. Falling back to AWS Textract.")
                 # Fall through to AWS Textract for better structured extraction
-            elif not (has_investigations and has_tpr and has_medicines):
-                logger.warning(f"S3-direct extraction incomplete for {file_name} (missing some fields). Trying AWS Textract.")
-                # Fall through to AWS Textract for better results
             else:
                 return result
 

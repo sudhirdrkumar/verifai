@@ -4437,6 +4437,10 @@
         ['all_investigation_reports_with_values', 'all_investigation_report_lines', 'investigation_finding_in_details', 'investigation', 'lab_results', 'test_results', 'hematology', 'biochemistry'],
         60
       ));
+      console.log('🔍 INVESTIGATION_ROWS_DEBUG: extracted=' + extractionPairs.length + ' pairs, found=' + allInvestigationRows.length + ' rows');
+      if (allInvestigationRows.length > 0) {
+        console.log('🔍 INVESTIGATION_SAMPLE: ' + allInvestigationRows.slice(0, 3).join(' | '));
+      }
       const structuredDerangedRows = normalizeInvestigationRows(extractTextByAliases(
         extractionPairs,
         ['deranged_investigation'],
