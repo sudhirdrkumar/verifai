@@ -589,7 +589,7 @@ def run_s3_openai_pipeline(
     logger.info(f"HYBRID_EXTRACTION_START: file_name={file_name}, raw_mime_type={mime_type}, safe_mime={safe_mime}, is_image={is_image}, provider={provider.value}")
 
     if (is_image or is_pdf) and provider in (ExtractionProvider.openai, ExtractionProvider.auto):
-        logger.info(f"Using S3-direct extraction for {file_name} with provider={provider.value}")
+        logger.info(f"🚀 TRYING S3-DIRECT for {file_name} with provider={provider.value}")
         try:
             result = extract_via_s3_presigned_url(
                 s3_bucket=s3_bucket or settings.s3_bucket,
@@ -635,10 +635,11 @@ def run_s3_openai_pipeline(
             # Fall through to AWS Textract
 
     # Fallback extraction order: OpenAI (best context) → Textract (structured) → Local OCR (last resort)
+    logger.info(f"🔄 FALLING BACK from S3-direct for {file_name}")
     file_bytes = download_bytes(storage_key)
 
     # Try 1: OpenAI with local file (better at understanding context, filtering noise)
-    logger.info(f"S3-direct failed for {file_name}. Trying local OpenAI extraction (best context understanding)")
+    logger.info(f"🔄 TRY 1: OpenAI with local file for {file_name}")
     try:
         openai_result = run_extraction(
             provider=ExtractionProvider.openai,
@@ -648,12 +649,12 @@ def run_s3_openai_pipeline(
             storage_key=storage_key or None,
             s3_bucket=s3_bucket,
         )
-        logger.info(f"Local OpenAI extraction succeeded for {file_name}")
+        logger.info(f"✅ TRY 1 SUCCESS: OpenAI extraction for {file_name}")
         entities = openai_result.get("extracted_entities", {})
-        logger.info(f"HYBRID_EXTRACTION_FINAL: file_name={file_name}, method={openai_result.get('provider', 'unknown')}, has_investigations={bool(entities.get('all_investigation_reports_with_values'))}, has_tpr={bool(entities.get('daily_tpr_chart_min_max'))}, has_medicines={bool(entities.get('medicine_used'))}")
+        logger.info(f"🎯 HYBRID_EXTRACTION_FINAL: file_name={file_name}, method={openai_result.get('provider', 'unknown')}, has_investigations={bool(entities.get('all_investigation_reports_with_values'))}, has_tpr={bool(entities.get('daily_tpr_chart_min_max'))}, has_medicines={bool(entities.get('medicine_used'))}")
         return openai_result
     except Exception as openai_err:
-        logger.warning(f"Local OpenAI failed for {file_name}: {openai_err}. Trying AWS Textract.")
+        logger.warning(f"❌ TRY 1 FAILED: OpenAI failed for {file_name}: {openai_err}. Trying AWS Textract.")
 
     # Try 2: AWS Textract for structured data extraction
     try:
