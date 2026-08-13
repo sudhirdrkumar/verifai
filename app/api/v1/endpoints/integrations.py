@@ -226,6 +226,20 @@ def _legacy_first_value(payload: dict[str, Any], *keys: str) -> str:
     return ""
 
 
+def _is_company_name(value: str) -> bool:
+    """Check if value looks like a company/vendor name, not a person name."""
+    if not value:
+        return False
+    lower = value.lower().strip()
+    company_indicators = {
+        "rightworks", "tpa", "insurance", "company", "ltd", "inc", "pvt",
+        "corporation", "corp", "group", "solutions", "services", "hospital",
+        "clinic", "network", "care", "health", "medical", "centre", "center",
+        "diagnostic", "labs", "pharmacy", "nursing", "trust", "foundation",
+    }
+    return any(indicator in lower for indicator in company_indicators)
+
+
 def _parse_float_value(value: Any) -> float | None:
     raw = _clean_text(value)
     if not raw:
@@ -407,6 +421,14 @@ def _build_verifai_claim_details(claim_row: dict[str, Any], legacy_payload: dict
         or _legacy_first_value(legacy_payload, "patient_name", "benefname", "pri_benef_name")
     )
     insurer_name = _legacy_first_value(legacy_payload, "vendor_name", "vendor name", "insurance_company")
+
+    # Get insured_name but exclude company names (e.g., "rightworks", vendor names)
+    insured_name = _legacy_first_value(legacy_payload, "insured_name", "benefname", "pri_benef_name")
+    if insured_name and _is_company_name(insured_name):
+        # If extracted insured_name is actually a company, use patient_name instead
+        insured_name = ""
+    insured_name = insured_name or patient_name
+
     address_parts = [
         _legacy_first_value(legacy_payload, "hospital_city"),
         _legacy_first_value(legacy_payload, "hospital_state"),
@@ -415,7 +437,7 @@ def _build_verifai_claim_details(claim_row: dict[str, Any], legacy_payload: dict
     return {
         "policy_number": _legacy_first_value(legacy_payload, "policy_number"),
         "member_id": _clean_text(claim_row.get("patient_identifier")) or _legacy_first_value(legacy_payload, "member_id"),
-        "insured_name": _legacy_first_value(legacy_payload, "insured_name", "benefname", "pri_benef_name") or patient_name,
+        "insured_name": insured_name,
         "patient_name": patient_name,
         "hospital_name": _legacy_first_value(legacy_payload, "hospital_name", "hospital", "treating_hospital", "provider_hospital", "facility_name", "hospital_name_text"),
         "hospital_city": _legacy_first_value(legacy_payload, "hospital_city"),
