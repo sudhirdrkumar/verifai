@@ -634,12 +634,29 @@ def run_s3_openai_pipeline(
             logger.warning(f"S3-direct extraction failed: {e}. Falling back to AWS Textract for {file_name}")
             # Fall through to AWS Textract
 
-    # Fallback extraction: Try AWS Textract first, then local
-    logger.info(f"S3-direct/OpenAI failed for {file_name}. Trying AWS Textract (best for large PDFs)")
+    # Fallback extraction order: OpenAI (best context) → Textract (structured) → Local OCR (last resort)
     file_bytes = download_bytes(storage_key)
 
+    # Try 1: OpenAI with local file (better at understanding context, filtering noise)
+    logger.info(f"S3-direct failed for {file_name}. Trying local OpenAI extraction (best context understanding)")
     try:
-        # Try AWS Textract for better structured data extraction
+        openai_result = run_extraction(
+            provider=ExtractionProvider.openai,
+            document_name=file_name,
+            mime_type=mime_type,
+            payload=file_bytes,
+            storage_key=storage_key or None,
+            s3_bucket=s3_bucket,
+        )
+        logger.info(f"Local OpenAI extraction succeeded for {file_name}")
+        entities = openai_result.get("extracted_entities", {})
+        logger.info(f"HYBRID_EXTRACTION_FINAL: file_name={file_name}, method={openai_result.get('provider', 'unknown')}, has_investigations={bool(entities.get('all_investigation_reports_with_values'))}, has_tpr={bool(entities.get('daily_tpr_chart_min_max'))}, has_medicines={bool(entities.get('medicine_used'))}")
+        return openai_result
+    except Exception as openai_err:
+        logger.warning(f"Local OpenAI failed for {file_name}: {openai_err}. Trying AWS Textract.")
+
+    # Try 2: AWS Textract for structured data extraction
+    try:
         textract_result = run_extraction(
             provider=ExtractionProvider.aws_textract,
             document_name=file_name,
@@ -649,11 +666,13 @@ def run_s3_openai_pipeline(
             s3_bucket=s3_bucket,
         )
         logger.info(f"AWS Textract extraction succeeded for {file_name}")
+        entities = textract_result.get("extracted_entities", {})
+        logger.info(f"HYBRID_EXTRACTION_FINAL: file_name={file_name}, method={textract_result.get('provider', 'unknown')}, has_investigations={bool(entities.get('all_investigation_reports_with_values'))}, has_tpr={bool(entities.get('daily_tpr_chart_min_max'))}, has_medicines={bool(entities.get('medicine_used'))}")
         return textract_result
     except Exception as textract_err:
         logger.warning(f"AWS Textract failed for {file_name}: {textract_err}. Falling back to local extraction.")
 
-    # Last resort: Local extraction
+    # Try 3: Local OCR extraction (last resort)
     logger.info(f"Using local extraction (last resort) for {file_name}")
     result = run_extraction(
         provider=provider,
@@ -663,8 +682,6 @@ def run_s3_openai_pipeline(
         storage_key=storage_key or None,
         s3_bucket=s3_bucket,
     )
-
-    # Log final extraction result
     entities = result.get("extracted_entities", {})
     logger.info(f"HYBRID_EXTRACTION_FINAL: file_name={file_name}, method={result.get('provider', 'unknown')}, has_investigations={bool(entities.get('all_investigation_reports_with_values'))}, has_tpr={bool(entities.get('daily_tpr_chart_min_max'))}, has_medicines={bool(entities.get('medicine_used'))}")
     return result
