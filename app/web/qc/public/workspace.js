@@ -439,7 +439,7 @@
     window.location.href = "/qc/login";
   }
 
-  async function apiFetch(path, options) {
+    async function apiFetch(path, options) {
     const token = getToken();
     if (!token) {
       clearAuthAndRedirect();
@@ -472,8 +472,127 @@
         : (detail != null ? JSON.stringify(detail) : '');
       throw new Error(detailText || ("HTTP " + resp.status));
     }
-    return body;
-  }
+      return body;
+    }
+
+    async function waitForExtractionJob(jobId, options) {
+      const opts = options || {};
+      const timeoutMs = Math.max(5000, Number(opts.timeoutMs || 180000));
+      const intervalMs = Math.max(1000, Number(opts.intervalMs || 4000));
+      const startedAt = Date.now();
+      let lastJob = null;
+      let lastError = null;
+      while ((Date.now() - startedAt) < timeoutMs) {
+        try {
+          lastJob = await apiFetch('/api/v1/extraction-jobs/' + encodeURIComponent(String(jobId || '')));
+          if (lastJob && (lastJob.status === 'succeeded' || lastJob.status === 'failed')) {
+            return lastJob;
+          }
+        } catch (err) {
+          lastError = err;
+          if (opts.stopOnError) throw err;
+        }
+        await new Promise(function (resolve) {
+          window.setTimeout(resolve, intervalMs);
+        });
+      }
+      const timeoutError = new Error('Extraction job timed out while waiting for completion.');
+      timeoutError.lastJob = lastJob;
+      timeoutError.lastError = lastError;
+      throw timeoutError;
+    }
+
+    function uploadFormDataWithProgress(path, formData, onProgress) {
+      const token = getToken();
+      if (!token) {
+        clearAuthAndRedirect();
+        return Promise.reject(new Error('Not authenticated'));
+      }
+
+      return new Promise(function (resolve, reject) {
+        const xhr = new XMLHttpRequest();
+        xhr.open('POST', path, true);
+        xhr.setRequestHeader('Authorization', 'Bearer ' + token);
+        xhr.responseType = 'text';
+
+        if (xhr.upload && typeof onProgress === 'function') {
+          xhr.upload.onprogress = function (event) {
+            if (!event || !event.lengthComputable) return;
+            onProgress({
+              loaded: event.loaded,
+              total: event.total,
+              progress: event.total > 0 ? (event.loaded / event.total) : 0,
+            });
+          };
+        }
+
+        xhr.onload = function () {
+          let body = null;
+          const raw = String(xhr.responseText || '');
+          try {
+            body = raw ? JSON.parse(raw) : null;
+          } catch (_err) {
+            body = { detail: raw };
+          }
+
+          if (xhr.status >= 200 && xhr.status < 300) {
+            resolve(body);
+            return;
+          }
+          if (xhr.status === 401) clearAuthAndRedirect();
+          if (xhr.status === 413) {
+            reject(new Error('Upload size too large. Please upload smaller files or fewer files at once.'));
+            return;
+          }
+          const detail = body ? body.detail : null;
+          const detailText = typeof detail === 'string'
+            ? detail
+            : (detail != null ? JSON.stringify(detail) : '');
+          reject(new Error(detailText || ('HTTP ' + String(xhr.status))));
+        };
+
+        xhr.onerror = function () {
+          reject(new Error('Network error while uploading file.'));
+        };
+
+        xhr.send(formData);
+      });
+    }
+
+    async function uploadSingleDocumentForClaim(claimKey, file, uploadedBy, onProgress) {
+      const fd = new FormData();
+      fd.append('file', file);
+      fd.append('uploaded_by', String(uploadedBy || 'ui-user'));
+      fd.append('compression_mode', 'lossy');
+      const claimId = String(claimKey || '').trim();
+      try {
+        return await uploadFormDataWithProgress('/api/v1/claims/' + encodeURIComponent(claimId) + '/documents', fd, onProgress);
+      } catch (err) {
+        const fallbackFd = new FormData();
+        fallbackFd.append('files', file);
+        fallbackFd.append('uploaded_by', String(uploadedBy || 'ui-user'));
+        fallbackFd.append('compression_mode', 'lossy');
+        try {
+          const fallbackResult = await uploadFormDataWithProgress('/api/v1/claims/' + encodeURIComponent(claimId) + '/documents/merged', fallbackFd, onProgress);
+          return fallbackResult && fallbackResult.document ? fallbackResult.document : fallbackResult;
+        } catch (_fallbackErr) {
+          throw err;
+        }
+      }
+    }
+
+    async function runWithConcurrency(items, limit, worker) {
+      const queue = Array.isArray(items) ? items.slice() : [];
+      const maxWorkers = Math.max(1, Math.min(Number(limit || 1), queue.length || 1));
+      const workers = Array.from({ length: maxWorkers }, async function () {
+        while (queue.length) {
+          const item = queue.shift();
+          if (item == null) continue;
+          await worker(item);
+        }
+      });
+      await Promise.all(workers);
+    }
 
     async function apiFetchFile(path) {
     const token = getToken();
@@ -2569,6 +2688,94 @@
       actionButtons.forEach((btn) => {
         if (btn) btn.disabled = shouldDisable;
       });
+    }
+
+    function ensureUploadAfterPromptModal() {
+      let modalEl = document.getElementById('upload-after-modal');
+      if (modalEl) return modalEl;
+      const wrapper = document.createElement('div');
+      wrapper.innerHTML = ''
+        + '<div id="upload-after-modal" class="modal-backdrop">'
+        + '<div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="upload-after-modal-title">'
+        + '<div class="modal-header"><h3 id="upload-after-modal-title">Upload complete</h3><button type="button" class="btn-soft" id="upload-after-modal-close">Close</button></div>'
+        + '<div id="upload-after-modal-body" style="line-height:1.6;color:#1f2937;white-space:pre-wrap;">What would you like to do next?</div>'
+        + '<div id="upload-after-modal-progress-wrap" style="margin-top:12px;display:none;">'
+        + '<div style="height:8px;background:#e5e7eb;border-radius:999px;overflow:hidden;">'
+        + '<div id="upload-after-modal-progress-bar" style="height:100%;width:0%;background:#2563eb;transition:width .2s ease;"></div>'
+        + '</div>'
+        + '<div id="upload-after-modal-progress-text" style="margin-top:8px;font-size:13px;color:#4b5563;">Uploading...</div>'
+        + '</div>'
+        + '<div style="display:flex;justify-content:flex-end;gap:10px;margin-top:18px;flex-wrap:wrap;">'
+        + '<button type="button" class="btn-soft" id="upload-after-modal-more">Upload more documents</button>'
+        + '<button type="button" id="upload-after-modal-extract">Send for AI extraction</button>'
+        + '</div>'
+        + '</div>'
+        + '</div>';
+      document.body.appendChild(wrapper.firstChild);
+      modalEl = document.getElementById('upload-after-modal');
+      const closeModal = function () {
+        if (modalEl) modalEl.classList.remove('open');
+      };
+      const closeBtn = document.getElementById('upload-after-modal-close');
+      const moreBtn = document.getElementById('upload-after-modal-more');
+      const extractBtn = document.getElementById('upload-after-modal-extract');
+      if (closeBtn) closeBtn.addEventListener('click', closeModal);
+      if (modalEl) {
+        modalEl.addEventListener('click', function (e) {
+          if (e.target === modalEl) closeModal();
+        });
+      }
+      modalEl._moreBtn = moreBtn;
+      modalEl._extractBtn = extractBtn;
+      modalEl._progressWrap = document.getElementById('upload-after-modal-progress-wrap');
+      modalEl._progressBar = document.getElementById('upload-after-modal-progress-bar');
+      modalEl._progressText = document.getElementById('upload-after-modal-progress-text');
+      modalEl._closeModal = closeModal;
+      return modalEl;
+    }
+
+    function showUploadAfterPrompt(filesText, onExtract) {
+      const modalEl = ensureUploadAfterPromptModal();
+      const bodyEl = document.getElementById('upload-after-modal-body');
+      const moreBtn = modalEl && modalEl._moreBtn ? modalEl._moreBtn : document.getElementById('upload-after-modal-more');
+      const extractBtn = modalEl && modalEl._extractBtn ? modalEl._extractBtn : document.getElementById('upload-after-modal-extract');
+      const progressWrap = modalEl && modalEl._progressWrap ? modalEl._progressWrap : document.getElementById('upload-after-modal-progress-wrap');
+      const progressBar = modalEl && modalEl._progressBar ? modalEl._progressBar : document.getElementById('upload-after-modal-progress-bar');
+      const progressText = modalEl && modalEl._progressText ? modalEl._progressText : document.getElementById('upload-after-modal-progress-text');
+      const closeModal = modalEl && modalEl._closeModal ? modalEl._closeModal : function () { if (modalEl) modalEl.classList.remove('open'); };
+      if (bodyEl) {
+        bodyEl.textContent = 'Uploaded ' + String(filesText || 'documents') + '. Upload more documents, or send the current upload for AI extraction now?';
+      }
+      if (progressWrap) progressWrap.style.display = 'none';
+      if (progressBar) progressBar.style.width = '0%';
+      if (progressText) progressText.textContent = 'Uploading...';
+      if (moreBtn) {
+        moreBtn.onclick = function () {
+          closeModal();
+        };
+      }
+      if (extractBtn) {
+        extractBtn.onclick = function () {
+          closeModal();
+          if (typeof onExtract === 'function') onExtract();
+        };
+      }
+      if (modalEl) modalEl.classList.add('open');
+    }
+
+    function updateUploadAfterPromptProgress(current, total, label) {
+      const modalEl = document.getElementById('upload-after-modal');
+      if (!modalEl) return;
+      const progressWrap = modalEl._progressWrap || document.getElementById('upload-after-modal-progress-wrap');
+      const progressBar = modalEl._progressBar || document.getElementById('upload-after-modal-progress-bar');
+      const progressText = modalEl._progressText || document.getElementById('upload-after-modal-progress-text');
+      const totalCount = Math.max(1, Number(total || 0));
+      const doneCount = Math.min(totalCount, Math.max(0, Number(current || 0)));
+      if (progressWrap) progressWrap.style.display = 'block';
+      if (progressBar) progressBar.style.width = String(Math.round((doneCount / totalCount) * 100)) + '%';
+      if (progressText) {
+        progressText.textContent = String(label || 'Uploading...') + ' (' + String(doneCount) + '/' + String(totalCount) + ')';
+      }
     }
 
     function renderDiagnosisChecklistResult(payload) {
@@ -4826,16 +5033,15 @@
       const report = payload && typeof payload.report_json === 'object' && payload.report_json ? payload.report_json : null;
       if (!report) {
         appendLog('VerifAI report JSON is not available for report generation.');
-        return '';
+        return buildLegacyReportHtml(new Date().toLocaleString(), String((me && me.username) || ''), [], []);
       }
 
       const mapped = buildReportPairsFromStructuredData(report);
       if (!Array.isArray(mapped.extractionPairs) || mapped.extractionPairs.length === 0) {
-        appendLog('VerifAI report JSON did not contain report-ready fields.');
-        return '';
+        appendLog('VerifAI report JSON did not contain report-ready fields. Rendering with fallback claim context.');
+      } else {
+        appendLog('Report fields loaded from VerifAI JSON (' + String(report.source || 'verifai_report') + ').');
       }
-
-      appendLog('Report fields loaded from VerifAI JSON (' + String(report.source || 'verifai_report') + ').');
       return buildLegacyReportHtml(new Date().toLocaleString(), String((me && me.username) || ''), mapped.extractionPairs, mapped.evidenceLines || []);
     }
 
@@ -4850,8 +5056,11 @@
         }),
       });
       if (!result || typeof result !== 'object') return null;
-      if (!/^(?:llm|verifai)/i.test(String(result.source || ''))) {
-        throw new Error('VerifAI structured extraction was not produced for this claim.');
+      const sourceText = String(result.source || '').trim();
+      if (!sourceText) {
+        appendLog('Structured report returned no source label; continuing with available fields.');
+      } else if (!/^(?:llm|verifai|heuristic)/i.test(sourceText)) {
+        appendLog('Structured report source is ' + sourceText + '; continuing with available fields.');
       }
       return {
         source: 'claim_structured_data',
@@ -5866,14 +6075,21 @@
             console.log('Sending extraction request to:', '/api/v1/documents/' + encodeURIComponent(docId) + '/extract');
             console.log('Request payload:', { provider: 'openai', actor_id: me && me.username ? me.username : '', force_refresh: false });
             startExtractionProgressTimer('Extracting: ' + docName);
-            const result = await apiFetch('/api/v1/documents/' + encodeURIComponent(docId) + '/extract', {
+            const job = await apiFetch('/api/v1/documents/' + encodeURIComponent(docId) + '/extract', {
               method: 'POST',
               body: JSON.stringify({ provider: 'openai', actor_id: me && me.username ? me.username : '', force_refresh: false }),
             });
+            const jobId = String((job && job.job_id) || '').trim();
+            if (!jobId) {
+              throw new Error('Extraction job id was not returned.');
+            }
+            await waitForExtractionJob(jobId, { timeoutMs: 180000, intervalMs: 4000 });
+            const extractionList = await apiFetch('/api/v1/documents/' + encodeURIComponent(docId) + '/extractions?limit=1&offset=0');
+            const result = extractionList && Array.isArray(extractionList.items) && extractionList.items.length > 0 ? extractionList.items[0] : null;
             stopExtractionProgressTimer();
             console.log('Extraction result:', result);
             console.log('Extracted entities:', result && result.extracted_entities ? result.extracted_entities : 'NONE');
-            syncVerifaiReportFromExtraction(result);
+            if (result) syncVerifaiReportFromExtraction(result);
             if (progressBar) progressBar.style.width = '100%';
             if (progressStatus) progressStatus.textContent = 'Extraction completed! Displaying data...';
             setMessage('case-detail-msg', 'ok', 'Extraction completed. Data extracted below.');
@@ -5938,15 +6154,22 @@
               console.log('Sending force extraction request to:', '/api/v1/documents/' + encodeURIComponent(docId) + '/extract');
               console.log('Request payload:', { provider: 'openai', actor_id: me && me.username ? me.username : '', force_refresh: true });
               startExtractionProgressTimer('Force re-extracting: ' + docName + ' (' + (i+1) + '/' + docs.length + ')');
-              const result = await apiFetch('/api/v1/documents/' + encodeURIComponent(docId) + '/extract', {
+              const job = await apiFetch('/api/v1/documents/' + encodeURIComponent(docId) + '/extract', {
                 method: 'POST',
                 body: JSON.stringify({ provider: 'openai', actor_id: me && me.username ? me.username : '', force_refresh: true }),
               });
+              const jobId = String((job && job.job_id) || '').trim();
+              if (!jobId) {
+                throw new Error('Extraction job id was not returned.');
+              }
+              await waitForExtractionJob(jobId, { timeoutMs: 180000, intervalMs: 4000 });
+              const extractionList = await apiFetch('/api/v1/documents/' + encodeURIComponent(docId) + '/extractions?limit=1&offset=0');
+              const result = extractionList && Array.isArray(extractionList.items) && extractionList.items.length > 0 ? extractionList.items[0] : null;
             stopExtractionProgressTimer();
             console.log('✅ EXTRACTION_SUCCESS - Force extraction completed');
             console.log('Force extraction result:', result);
             console.log('Extracted entities:', result && result.extracted_entities ? result.extracted_entities : 'NONE');
-            syncVerifaiReportFromExtraction(result);
+            if (result) syncVerifaiReportFromExtraction(result);
 
             // CRITICAL: Merge extracted investigations, TPR, and medicines into report
             if (result && result.extracted_entities) {
@@ -6132,9 +6355,15 @@
           return;
         }
 
+        // Open new tab IMMEDIATELY with loading state
         reportTab = window.open('', '_blank');
+        if (reportTab) {
+          renderReportLoadingTab(reportTab, 'Generating report...', '0s');
+          appendLog('✅ New tab opened. Starting background report generation...');
+        }
         stageText = 'Refreshing latest decision...';
         renderProgress();
+        if (reportTab && !reportTab.closed) renderReportLoadingTab(reportTab, stageText, formatElapsedClock(Date.now() - startedAt));
         try {
           const latestChecklist = await apiFetch('/api/v1/claims/' + encodeURIComponent(claimUuid) + '/checklist/latest');
           if (latestChecklist && latestChecklist.found) {
@@ -6717,47 +6946,85 @@
 
       const previewNames = list.slice(0, 5).map(function (f) { return String(f && f.name ? f.name : 'file'); }).join(', ');
       const moreCount = Math.max(0, list.length - 5);
-      setModalBusy(true, 'Uploading and merging ' + String(list.length) + ' file(s)...' + (previewNames ? ' [' + previewNames + (moreCount > 0 ? ', +' + String(moreCount) + ' more' : '') + ']' : ''));
-      setMessage('upload-doc-list-msg', '', 'Uploading and merging ' + String(list.length) + ' file(s) into single PDF...');
-
-      const fd = new FormData();
-      list.forEach(function (file) {
-        fd.append('files', file);
-      });
-      fd.append('uploaded_by', String((me && me.username) || 'ui-user'));
-      fd.append('compression_mode', 'lossy');
+      setModalBusy(true, 'Uploading ' + String(list.length) + ' file(s)...' + (previewNames ? ' [' + previewNames + (moreCount > 0 ? ', +' + String(moreCount) + ' more' : '') + ']' : ''));
+      setMessage('upload-doc-list-msg', '', 'Uploading ' + String(list.length) + ' file(s) directly to storage...');
+      updateUploadAfterPromptProgress(0, list.length, 'Uploading files');
 
       try {
-        const mergedResult = await apiFetch('/api/v1/claims/' + encodeURIComponent(claimKey) + '/documents/merged', {
-          method: 'POST',
-          body: fd,
+        const uploadedDocs = [];
+        const failedDocs = [];
+        const failedReasons = [];
+        let uploadedCount = 0;
+        let failedCount = 0;
+        const uploadedBy = String((me && me.username) || 'ui-user');
+        let completedCount = 0;
+        await runWithConcurrency(list, 4, async function (file) {
+          const fileName = String((file && file.name) || 'file');
+          try {
+            setModalBusy(true, 'Uploading ' + String(completedCount + 1) + ' of ' + String(list.length) + ': ' + fileName);
+            const result = await uploadSingleDocumentForClaim(claimKey, file, uploadedBy);
+            uploadedDocs.push(result);
+            uploadedCount += 1;
+          } catch (err) {
+            failedDocs.push(fileName);
+            failedReasons.push(fileName + ': ' + String(err && err.message ? err.message : err));
+            failedCount += 1;
+          } finally {
+            completedCount += 1;
+            setModalBusy(true, 'Uploaded ' + String(completedCount) + ' of ' + String(list.length) + ' file(s)...');
+            updateUploadAfterPromptProgress(completedCount, list.length, 'Uploaded');
+          }
         });
 
-        const sourceCount = Number((mergedResult && mergedResult.source_file_count) || list.length || 0);
-        const acceptedCount = Number((mergedResult && mergedResult.accepted_file_count) || 0);
-        const skippedCount = Number((mergedResult && mergedResult.skipped_file_count) || 0);
-        const mergedDocName = String((mergedResult && mergedResult.document && mergedResult.document.file_name) || 'merged_document.pdf');
-        const mergeProfile = String((mergedResult && mergedResult.document && mergedResult.document.metadata && mergedResult.document.metadata.merge_profile) || 'standard');
-        const sourceSizeBytes = Number((mergedResult && mergedResult.merged_source_total_size_bytes) || 0);
-        const outputSizeBytes = Number((mergedResult && mergedResult.merged_output_size_bytes)
-          || (mergedResult && mergedResult.document && mergedResult.document.file_size_bytes)
-          || 0);
-        const savedSizeBytes = Number((mergedResult && mergedResult.merged_saved_size_bytes) || Math.max(0, sourceSizeBytes - outputSizeBytes));
-        const lowSavings = sourceSizeBytes > 0 && outputSizeBytes >= (sourceSizeBytes * 0.98);
+        const uploadedNames = uploadedDocs.map(function (item) { return String(item && item.file_name ? item.file_name : 'document'); }).filter(Boolean);
+        const summaryText = 'Upload complete. Uploaded: ' + String(uploadedCount) + ', failed: ' + String(failedCount) + '.';
+        setMessage('upload-doc-list-msg', uploadedCount > 0 ? 'ok' : 'err', summaryText);
+        setModalMessage(uploadedCount > 0 ? 'ok' : 'err', summaryText);
+        if (failedReasons.length) {
+          setModalMessage('err', summaryText + '\n' + failedReasons.slice(0, 3).join('\n'));
+          setMessage('upload-doc-list-msg', 'err', summaryText + ' ' + failedReasons.slice(0, 2).join(' | '));
+        }
 
-        const successText = 'Merged upload complete. Source: ' + String(sourceCount)
-          + ', accepted: ' + String(acceptedCount)
-          + ', skipped: ' + String(skippedCount)
-          + '. Saved as: ' + mergedDocName + ' (' + String(acceptedCount) + ')'
-          + ', Size: ' + formatBytes(outputSizeBytes)
-          + (sourceSizeBytes > 0 ? (', Compressed: ' + formatBytes(sourceSizeBytes) + ' -> ' + formatBytes(outputSizeBytes) + ' (saved ' + formatBytes(savedSizeBytes) + ')') : '')
-          + ', Mode: ' + mergeProfile
-          + (lowSavings ? '. Note: Source files are already PDF/compressed, so additional compression is limited.' : '');
+        const firstUploaded = uploadedDocs.length > 0 ? uploadedDocs[0] : null;
+        const firstUploadedId = String(firstUploaded && firstUploaded.id ? firstUploaded.id : '').trim();
+        const promptLabel = uploadedNames.length > 0 ? uploadedNames.join(', ') : (list[0] && list[0].name ? String(list[0].name) : 'documents');
+        if (firstUploadedId) {
+          showUploadAfterPrompt(promptLabel, async function () {
+            const targetDocIds = uploadedDocs
+              .map(function (item) { return String(item && item.id ? item.id : '').trim(); })
+              .filter(Boolean);
+            if (!targetDocIds.length) {
+              setMessage('upload-doc-list-msg', 'err', 'No uploaded documents were returned for AI extraction.');
+              return;
+            }
 
-        setMessage('upload-doc-list-msg', 'ok', successText);
-        setModalMessage('ok', successText);
+            setModalBusy(true, 'Queueing AI extraction for ' + String(targetDocIds.length) + ' document(s)...');
+            try {
+              const queuedJobs = [];
+              for (const docId of targetDocIds) {
+                const job = await apiFetch('/api/v1/documents/' + encodeURIComponent(docId) + '/extract', {
+                  method: 'POST',
+                  body: JSON.stringify({
+                    provider: 'openai',
+                    actor_id: String((me && me.username) || 'ui-user'),
+                    force_refresh: true,
+                  }),
+                });
+                queuedJobs.push(job);
+              }
+              setMessage('upload-doc-list-msg', 'ok', 'AI extraction queued for ' + String(targetDocIds.length) + ' document(s).');
+              setModalMessage('ok', 'AI extraction queued for ' + String(targetDocIds.length) + ' document(s).');
+            } catch (err) {
+              const msg = err && err.message ? err.message : 'AI extraction failed.';
+              setMessage('upload-doc-list-msg', 'err', msg);
+              setModalMessage('err', msg);
+            } finally {
+              setModalBusy(false);
+            }
+          });
+        }
       } catch (err) {
-        const msg = err && err.message ? err.message : 'Merge upload failed.';
+        const msg = err && err.message ? err.message : 'Upload failed.';
         setMessage('upload-doc-list-msg', 'err', msg);
         setModalMessage('err', msg);
       } finally {
@@ -6872,10 +7139,11 @@
           fileInput.setAttribute('data-claim-id', claimId);
           fileInput.setAttribute('data-claim-external-id', claimExternalId);
           fileInput.value = '';
-
-          await showUploadedDocuments(claimId, claimExternalId);
           setModalMessage('', 'Select files now. Upload will run in this modal.');
           fileInput.click();
+          showUploadedDocuments(claimId, claimExternalId).catch(function (err) {
+            setMessage('upload-doc-list-msg', 'err', err && err.message ? err.message : 'Failed to load uploaded documents.');
+          });
         });
       });
 
