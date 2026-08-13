@@ -448,6 +448,9 @@
     const opts = options || {};
     const headers = new Headers(opts.headers || {});
     headers.set("Authorization", "Bearer " + token);
+    if (opts.body && !(opts.body instanceof FormData) && !headers.has("Content-Type")) {
+      headers.set("Content-Type", "application/json");
+    }
 
     const resp = await fetch(path, { ...opts, headers });
     const raw = await resp.text();
@@ -1882,7 +1885,7 @@
   function isLikelyOrgName(value) {
     const v = String(value || '').trim();
     if (!v) return false;
-    return /(hospital|clinic|diagnostic|laboratory|\blab\b|society|insurance|limited|\bltd\b|llp|plaza)/i.test(v);
+    return /(hospital|clinic|diagnostic|laboratory|\blab\b|society|insurance|limited|\bltd\b|llp|plaza|eye\s*care|care\s*centre|care\s*center|medical\s*centre|medical\s*center|nursing\s*home)/i.test(v);
   }
 
   async function runCasePreparationPipeline(claimUuid, actorId, options) {
@@ -2375,6 +2378,20 @@
       + '<div class="link-row case-detail-actions">'
       + '<button type="button" id="case-generate-report" disabled>Generate Report</button>'
       + '<button type="button" class="btn-soft" id="case-change-status" disabled>Mark Completed</button>'
+      + '<button type="button" class="btn-soft" id="case-verify-extract" disabled>Verify</button>'
+      + '<button type="button" class="btn-soft" id="case-force-verifai" disabled>Force VerifAI</button>'
+      + '</div>'
+      + '<div id="case-extraction-progress" style="margin-top:10px; display:none;">'
+      + '<div style="background:#e3f2fd; border:1px solid #90caf9; border-radius:4px; padding:12px;">'
+      + '<div style="display:flex; align-items:center; gap:10px;">'
+      + '<div style="flex-grow:1;">'
+      + '<div id="case-extraction-status" style="color:#1976d2; font-weight:500; margin-bottom:8px;">Extraction in progress...</div>'
+      + '<div style="height:6px; background:#e0e0e0; border-radius:3px; overflow:hidden;">'
+      + '<div id="case-extraction-bar" style="height:100%; background:#1976d2; width:0%; transition:width 0.3s;"></div>'
+      + '</div>'
+      + '</div>'
+      + '</div>'
+      + '</div>'
       + '</div>'
       + '<div class="table-wrap view-documents-table-wrap"><table><thead><tr><th>File Name</th><th>Parse Status</th><th>Uploaded By</th><th>Uploaded At</th><th>Action</th></tr></thead><tbody id="case-detail-docs"></tbody></table></div>'
 
@@ -2472,6 +2489,11 @@
         };
       }
       const diagnosis = sanitizeReportText(report.diagnosis || '');
+      const insuredName = sanitizeReportText(report.insured_name || report.name || '');
+      const hospitalName = sanitizeReportText(report.hospital_name || '');
+      const claimAmount = sanitizeReportText(report.claim_amount || report.claimed_amount || report.bill_amount || '');
+      const admissionDate = sanitizeReportText(report.doa || report.admission_date || '');
+      const dischargeDate = sanitizeReportText(report.dod || report.discharge_date || '');
       const complaints = sanitizeReportText(report.complaints || '');
       const findings = sanitizeReportText(report.findings || '');
       const medicines = sanitizeReportText(report.medicine_used || '');
@@ -2491,7 +2513,12 @@
         isMeaningfulAiText(doctorReg),
         isMeaningfulAiText(justification),
         supportingFindings.length > 0,
-        isMeaningfulAiText(diagnosis) && !isDiagnosisCodeOnly(diagnosis)
+        isMeaningfulAiText(diagnosis) && !isDiagnosisCodeOnly(diagnosis),
+        isMeaningfulAiText(insuredName),
+        isMeaningfulAiText(hospitalName),
+        isMeaningfulAiText(claimAmount),
+        isMeaningfulAiText(admissionDate),
+        isMeaningfulAiText(dischargeDate)
       ].filter(Boolean).length;
       const thinBecauseCodeOnly = isDiagnosisCodeOnly(diagnosis)
         && !isMeaningfulAiText(complaints)
@@ -2527,7 +2554,11 @@
       return !!(payload && typeof payload.report_json === 'object' && payload.report_json && Object.keys(payload.report_json).length > 0);
     }
 
+    let hasExtractedData = false;
+
     function hasUsableVerifaiAiInput() {
+      // Accept either VerifAI AI input OR extracted document data
+      if (hasExtractedData) return true;
       if (!hasVerifaiReportJsonReady()) return false;
       const aiInputState = getVerifaiAiInputState();
       return !aiInputState.thin;
@@ -2773,7 +2804,7 @@
       if (!text) return '';
       text = text.replace(/^(?:treating\s*doctor(?:\s*name)?|consult(?:ant|ing)\s*doctor|attending\s*doctor|doctor(?:\s*name)?)\s*[:\-]\s*/i, '');
 
-      const drMatch = text.match(/\bDr\.?\s*[A-Za-z][A-Za-z .'-]{1,80}/i);
+      const drMatch = text.match(/\bDr\.?\s*[A-Za-z][A-Za-z .'/\-]{1,80}/i);
       if (drMatch) text = String(drMatch[0] || '').trim();
 
       text = text
@@ -2796,7 +2827,12 @@
         'attending_doctor',
         'consultant_doctor',
         'consulting_doctor',
-        'primary_doctor'
+        'primary_doctor',
+        'consultant_name',
+        'admitting_doctor',
+        'admitting_dr',
+        'treating_consultant',
+        'doctor'
       ].map(normalizeKey);
       const candidates = [];
       (Array.isArray(extractionPairs) ? extractionPairs : []).forEach(function (pair) {
@@ -2891,11 +2927,11 @@
     function extractDoctorNameFromNarrative(extractionPairs, insuredName, hospitalName) {
       const sources = extractTextByAliases(
         extractionPairs,
-        ['treating_doctor', 'treating_doctor_name', 'doctor_name', 'attending_doctor', 'consultant_doctor', 'consulting_doctor', 'primary_doctor', 'clinical_findings', 'major_diagnostic_finding', 'summary'],
+        ['treating_doctor', 'treating_doctor_name', 'doctor_name', 'attending_doctor', 'consultant_doctor', 'consulting_doctor', 'primary_doctor', 'consultant_name', 'admitting_doctor', 'admitting_dr', 'treating_consultant', 'doctor', 'clinical_findings', 'major_diagnostic_finding', 'summary'],
         30
       );
       const candidates = [];
-      const doctorPattern = /\b(?:Dr\.?\s*[A-Za-z][A-Za-z .'-]{2,70})\b/g;
+      const doctorPattern = /\b(?:Dr\.?\s*[A-Za-z][A-Za-z .'/\-]{2,70})\b/g;
       sources.forEach(function (src) {
         const text = sanitizeReportText(src);
         if (!text) return;
@@ -2938,11 +2974,20 @@
       return false;
     }
 
+    function doctorNameFromMisfiledRegistration(value) {
+      const text = sanitizeReportText(value);
+      if (!text || text === '-' || isLikelyDoctorRegNo(text)) return '';
+      if (!/\bdr\.?\s*[A-Za-z]/i.test(text)) return '';
+      return normalizeDoctorNameCandidate(text);
+    }
+
     function extractDoctorRegistrationFromNarrative(extractionPairs) {
       const sources = extractTextByAliases(
         extractionPairs,
         [
-          'treating_doctor_registration_number', 'doctor_registration_number', 'registration_no', 'registration_number',
+          'treating_doctor_registration_number', 'doctor_registration_number', 'treating_doctor_reg_no', 'doctor_reg_no',
+          'registration_no', 'reg_no', 'registration_number', 'registration', 'medical_registration_number',
+          'doctor_medical_registration_number', 'council_registration_number', 'registration_number_of_doctor',
           'mci_reg_no', 'nmc_reg_no', 'clinical_findings', 'major_diagnostic_finding', 'summary'
         ],
         40
@@ -3201,6 +3246,24 @@
         let cleaned = sanitizeReportText(text).replace(/^[\-?]+\s*/, '').trim();
         if (!cleaned) return;
         cleaned = cleaned.replace(/^\s*test\s*:\s*/i, '').trim();
+        const valueMatch = cleaned.match(/\bvalue\s*:\s*([^|]+)/i);
+        const rangeMatch = cleaned.match(/\breference[_\s-]*range\s*:\s*([^|]+)/i);
+        const valueText = valueMatch ? sanitizeReportText(valueMatch[1]).toLowerCase() : '';
+        const rangeText = rangeMatch ? sanitizeReportText(rangeMatch[1]).toLowerCase() : '';
+        const emptyValue = !!valueMatch && /^(?:-|na|n\/a|nil|none)?$/.test(valueText);
+        const emptyRange = !!rangeMatch && /^(?:-|na|n\/a|nil|none)?$/.test(rangeText);
+        if (valueMatch && rangeMatch && emptyValue && emptyRange) return;
+        const hasValueResult = !!valueMatch && !emptyValue;
+        const hasRangeResult = !!rangeMatch && !emptyRange;
+        const hasWordResult = /\b(?:positive|negative|reactive|non[-\s]*reactive|detected|not\s+detected|normal|abnormal|high|low|elevated|decreased|impression|finding|opacity|edema|haemorrhage|hemorrhage|acuity)\b/i.test(cleaned);
+        if (/\bdate\s*:/i.test(cleaned) && !hasValueResult && !hasRangeResult && !hasWordResult) return;
+        cleaned = cleaned.replace(/\blab_name\s*:\s*-\s*\|\s*/ig, '');
+        cleaned = cleaned.replace(/\blab\s*name\s*:\s*-\s*\|\s*/ig, '');
+        cleaned = cleaned.replace(/\blab\s*:\s*-\s*\|\s*/ig, '');
+        cleaned = cleaned.replace(/\btest\s*:\s*/ig, '');
+        cleaned = cleaned.replace(/\bvalue\s*:\s*/ig, 'Value: ');
+        cleaned = cleaned.replace(/\breference_range\s*:\s*/ig, 'Range: ');
+        cleaned = cleaned.replace(/\breference\s*range\s*:\s*/ig, 'Range: ');
         if (isNoiseLine(cleaned)) return;
         const dedupeKey = lineFingerprint(cleaned) || cleaned.toLowerCase();
         if (seen.has(dedupeKey)) return;
@@ -3493,6 +3556,8 @@
           if (!cleaned || cleaned === '-') return;
           if (!/[A-Za-z]/.test(cleaned)) return;
           if (/^(?:list\s+of\s+medicines|details?\s+of\s+medication|ipd\s+medicine\s+bill)/i.test(cleaned)) return;
+          if (isAdministrativeEvidenceLine(cleaned) || isAdministrativeClinicalNoise(cleaned)) return;
+          if (!/\b(?:tab|tablet|cap|capsule|inj|injection|syp|syrup|drops?|eye\s*drops?|mg|ml|mcg|iu|iv|im|po|od|bd|tid|qid|antibiotic|paracetamol|cef|azithro|metro|amox|cipro|ofloxacin|pantop|ondansetron|diamox|nepalact|apdrops?)\b/i.test(cleaned)) return;
           const key = medicineFingerprint(cleaned) || cleaned.toLowerCase();
           if (seen.has(key)) return;
           seen.add(key);
@@ -3993,6 +4058,7 @@
       if (/^[0-9.,:\-\/\s]+$/.test(t)) return '';
       if (/^\d+\s*$/.test(t)) return '';
       if (isLikelyMimeType(t)) return '';
+      if (isInsuranceHistoryArtifact(t)) return '';
       return t;
     }
 
@@ -4073,6 +4139,62 @@
 
       return sanitizeReportText(lineFiltered.join('\n'));
     }
+
+    function hasClinicalSignalText(value) {
+      const text = sanitizeReportText(value);
+      if (!text || text === '-') return false;
+      const clinicalHits = (text.match(/\b(?:fever|headache|vomit(?:ing)?|abd(?:ominal)?\s*pain|enteric|typhoid|malaria|dengue|infection|sepsis|pneumonia|uti|fracture|swelling|tenderness|diarrhea|cough|breathlessness|tachycardia|hypotension|hypertension|bp|pulse|spo2|temperature|rbc|wbc|platelet|creatinine|sodium|potassium|diagnosis\s*[:\-]\s*[a-z])\b/ig) || []).length;
+      return clinicalHits > 0;
+    }
+
+    function isAdministrativeClinicalNoise(value) {
+      const text = sanitizeReportText(value).toLowerCase();
+      if (!text || text === '-') return false;
+      const noiseHits = (text.match(/\b(?:past\s+history\s+of\s+present\s+ailment|provisional\s+diagnosisi|proposed\s+(?:line|lane)\s+of\s+treatment|non[-\s]*allopathic|payment\s+receipts?|claim\s+form|indemnity|lodgement|sum\s+insured|fir|mlc|implant\s+stickers?|hospital\s+registration|full\s+postal\s+address|name\s+of\s+the\s+manager|received\s+with\s+thanks|not\s+received\s+any\s+reply|ayush\s+treatment|naturopathy\s+is\s+excluded|detailed\s+discharge\s+summary\s+specifying|father'?s\s+name|date\s+of\s+birth|university|income\s+tax\s+layout)\b/g) || []).length;
+      return noiseHits >= 1 && !hasClinicalSignalText(text) && !extractProcedureSummaryText(text);
+    }
+
+    function isAdministrativeEvidenceLine(value) {
+      const text = sanitizeReportText(value).toLowerCase();
+      if (!text || text === '-') return false;
+      return /\b(?:policy\s*number|corporate|indemnity|expenses\s+incurred|not\s+reimbursed|payment\s+receipts?|implant\s+stickers?|fir\/?mlc|rta'?s|claim\s+form|sum\s+insured|ayush\s+treatment|naturopathy\s+is\s+excluded|detailed\s+discharge\s+summary\s+specifying|father'?s\s+name|date\s+of\s+birth|address\s+s\/o|income\s+tax\s+layout|university|r\.g\.u\.h\.s|bangalore|ground,\s*m\.g\.road|proposed\s+(?:line|lane)\s+of\s+treatment|non[-\s]*allopathic|past\s+history\s+of\s+present\s+ailment)\b/i.test(text);
+    }
+
+    function isInsuranceHistoryArtifact(value) {
+      const text = sanitizeReportText(value).toLowerCase();
+      if (!text || text === '-') return false;
+      if (/\bpreviously\s+covered\s+by\s+any\s+other\s+mediclaim\b/i.test(text)) return true;
+      if (/\bself\s+inflicted\s+road\s+traffic\s+accident\b/i.test(text)) return true;
+      if (/\bsubstance\s+abuse\s*\/?\s*alcohol\s+consumption\b/i.test(text)) return true;
+      return false;
+    }
+
+    function buildClinicalFallbackSummary(chiefComplaintsText, diagnosisText) {
+      const complaints = sanitizeReportText(chiefComplaintsText);
+      const dx = sanitizeReportText(diagnosisText);
+      const parts = [];
+      if (complaints && complaints !== '-') parts.push('Chief complaints: ' + complaints);
+      if (dx && dx !== '-') parts.push('Diagnosis: ' + dx);
+      return parts.length ? ('Available clinical summary: ' + parts.join('. ') + '.') : '';
+    }
+
+    function extractProcedureSummaryText(value) {
+      const text = sanitizeReportText(value);
+      if (!text || text === '-') return '';
+      const patterns = [
+        /procedure\s*\/\s*treatment\s*planned\s*[:\-]?\s*([\s\S]+)/i,
+        /procedure\s*performed\s*[:\-]?\s*([\s\S]+)/i,
+        /treatment\s*planned\s*[:\-]?\s*([\s\S]+)/i
+      ];
+      for (let i = 0; i < patterns.length; i += 1) {
+        const match = text.match(patterns[i]);
+        if (!match || !match[1]) continue;
+        const cleaned = trimClinicalTextAtStopLabels(match[1]).replace(/^[\s,;:.\-]+/, '').trim();
+        if (cleaned && cleaned !== '-') return cleaned;
+      }
+      return '';
+    }
+
     function firstNonEmpty() {
       for (let i = 0; i < arguments.length; i += 1) {
         const candidate = sanitizeReportText(arguments[i]);
@@ -4157,10 +4279,13 @@
         const genderPart = gender && gender !== '-' ? ('/' + gender.charAt(0).toUpperCase()) : '';
         return (name + agePart + genderPart).trim() || name;
       }());
+      const hospitalFromLegacy = legacyValue('hospital_name', 'hospital', 'provider_name', 'provider_hospital', 'provider_hospital_name', 'treating_hospital', 'hospital_city_name', 'facility_name', 'institution_name');
+      const hospitalFromExtraction = extractTextByAliases(extractionPairs, ['hospital_name', 'hospital', 'provider_hospital', 'treating_hospital', 'hospital_city_name', 'facility_name', 'institution_name', 'provider_name'], 1)[0];
       let hospital = firstNonEmpty(
-        extractTextByAliases(extractionPairs, ['hospital_name', 'hospital', 'provider_hospital', 'treating_hospital', 'hospital_city_name', 'facility_name', 'institution_name', 'provider_name'], 1)[0],
-        legacyValue('hospital_name', 'hospital', 'provider_name', 'provider_hospital', 'provider_hospital_name', 'treating_hospital', 'hospital_city_name', 'facility_name', 'institution_name'),
+        hospitalFromLegacy,
+        hospitalFromExtraction,
         currentStatusItem && currentStatusItem.hospital_name,
+        (currentClaim && Array.isArray(currentClaim.tags) && currentClaim.tags.length > 2 && isLikelyOrgName(currentClaim.tags[2])) ? currentClaim.tags[2] : '',
         (currentClaim && Array.isArray(currentClaim.tags) && currentClaim.tags.length > 3) ? currentClaim.tags[3] : '',
         '-'
       );
@@ -4176,8 +4301,8 @@
       const treatingDoctorFromExtraction = normalizeDoctorNameCandidate(extractTreatingDoctorName(extractionPairs));
       let treatingDoctor = normalizeDoctorNameCandidate(firstNonEmpty(
         (treatingDoctorFromExtraction && treatingDoctorFromExtraction !== '-') ? treatingDoctorFromExtraction : '',
-        extractTextByAliases(extractionPairs, ['treating_doctor', 'treating_doctor_name', 'doctor_name', 'attending_doctor', 'consultant_doctor'], 1)[0],
-        legacyValue('treating_doctor', 'treating_doctor_name', 'doctor_name', 'attending_doctor', 'consultant_doctor'),
+        extractTextByAliases(extractionPairs, ['treating_doctor', 'treating_doctor_name', 'doctor_name', 'attending_doctor', 'consultant_doctor', 'consulting_doctor', 'primary_doctor', 'consultant_name', 'admitting_doctor', 'admitting_dr', 'treating_consultant', 'doctor'], 1)[0],
+        legacyValue('treating_doctor', 'treating_doctor_name', 'doctor_name', 'attending_doctor', 'consultant_doctor', 'consulting_doctor', 'primary_doctor', 'consultant_name', 'admitting_doctor', 'admitting_dr', 'treating_consultant', 'doctor'),
         '-'
       )) || '-';
       const narrativeDoctor = normalizeDoctorNameCandidate(extractDoctorNameFromNarrative(extractionPairs, insured, hospital));
@@ -4188,11 +4313,21 @@
         treatingDoctor = narrativeDoctor || '-';
       }
 
-      let treatingDoctorRegistration = normalizeDoctorRegNoCandidate(firstNonEmpty(
-        extractTextByAliases(extractionPairs, ['treating_doctor_registration_number', 'doctor_registration_number', 'registration_no', 'registration_number', 'mci_reg_no', 'nmc_reg_no'], 1)[0],
-        legacyValue('treating_doctor_registration_number', 'doctor_registration_number', 'registration_no', 'registration_number', 'mci_reg_no', 'nmc_reg_no'),
+      const doctorRegistrationRaw = firstNonEmpty(
+        extractTextByAliases(extractionPairs, ['treating_doctor_registration_number', 'doctor_registration_number', 'treating_doctor_reg_no', 'doctor_reg_no', 'registration_no', 'reg_no', 'registration_number', 'registration', 'medical_registration_number', 'doctor_medical_registration_number', 'council_registration_number', 'registration_number_of_doctor', 'mci_reg_no', 'nmc_reg_no'], 1)[0],
+        legacyValue('treating_doctor_registration_number', 'doctor_registration_number', 'treating_doctor_reg_no', 'doctor_reg_no', 'registration_no', 'reg_no', 'registration_number', 'registration', 'medical_registration_number', 'doctor_medical_registration_number', 'council_registration_number', 'registration_number_of_doctor', 'mci_reg_no', 'nmc_reg_no'),
         '-'
-      ));
+      );
+      const doctorNameFromRegistrationSlot = doctorNameFromMisfiledRegistration(doctorRegistrationRaw);
+      if (doctorNameFromRegistrationSlot
+          && (treatingDoctor === '-'
+            || isSameEntityText(treatingDoctor, insured)
+            || isSameEntityText(treatingDoctor, hospital)
+            || isLikelyOrgName(treatingDoctor))) {
+        treatingDoctor = doctorNameFromRegistrationSlot;
+      }
+
+      let treatingDoctorRegistration = normalizeDoctorRegNoCandidate(doctorRegistrationRaw);
       const narrativeDoctorRegistration = normalizeDoctorRegNoCandidate(extractDoctorRegistrationFromNarrative(extractionPairs));
       if ((!isLikelyDoctorRegNo(treatingDoctorRegistration)
           || isSameEntityText(treatingDoctorRegistration, insured)
@@ -4249,16 +4384,29 @@
         legacyValue('diagnosis', 'final_diagnosis', 'provisional_diagnosis', 'primary_diagnosis'),
         '-'
        );
-      const majorFindingRawText = firstNonEmpty(
-        extractTextByAliases(extractionPairs, ['major_diagnostic_finding', 'clinical_findings', 'diagnostic_finding', 'lab_findings', 'clinical'], 5).join('\n'),
-        diagnosis,
-        '-'
+      const majorFindingCandidateText = pickFirstValidValue(
+        extractTextByAliases(extractionPairs, ['major_diagnostic_finding', 'clinical_findings', 'diagnostic_finding', 'lab_findings', 'clinical'], 5),
+        function (value) { return !isAdministrativeClinicalNoise(value) || hasClinicalSignalText(value); }
       );
-      const chiefComplaintsDirect = sanitizeReportText(extractTextByAliases(extractionPairs, ['chief_complaints', 'chief_complaint', 'presenting_complaints', 'complaints'], 3).join('\n'));
+      const majorFindingRawText = firstNonEmpty(majorFindingCandidateText, diagnosis, '-');
+      const chiefComplaintsDirect = sanitizeReportText(extractTextByAliases(extractionPairs, ['chief_complaints_at_admission', 'chief_complaints', 'chief_complaint', 'presenting_complaints', 'complaints'], 3).join('\n'));
       const chiefComplaintsFromNarrative = extractChiefComplaintsFromNarrative(majorFindingRawText);
-      const chiefComplaints = firstNonEmpty(chiefComplaintsDirect, chiefComplaintsFromNarrative, '-');
+      let chiefComplaints = firstNonEmpty(chiefComplaintsDirect, chiefComplaintsFromNarrative, '-');
+      if (chiefComplaints === '-' && currentVerifaiReport && currentVerifaiReport.local_extraction) {
+        const reportJson = currentVerifaiReport.report_json || {};
+        chiefComplaints = firstNonEmpty(
+          reportJson.chief_complaints_at_admission,
+          reportJson.complaints,
+          reportJson.chief_complaints,
+          reportJson.chief_complaint,
+          '-'
+        );
+      }
+      const clinicalFallbackSummary = buildClinicalFallbackSummary(chiefComplaints, diagnosis);
+      const cleanedMajorFinding = cleanMajorDiagnosticFindingText(majorFindingRawText, chiefComplaints);
       const majorFinding = firstNonEmpty(
-        cleanMajorDiagnosticFindingText(majorFindingRawText, chiefComplaints),
+        (!isAdministrativeClinicalNoise(cleanedMajorFinding) && !isAdministrativeEvidenceLine(cleanedMajorFinding)) ? cleanedMajorFinding : '',
+        clinicalFallbackSummary,
         diagnosis,
         '-'
       );
@@ -4276,6 +4424,9 @@
         }
       );
       const claimedAmount = firstNonEmpty(
+        currentStatusItem && currentStatusItem.claim_amount,
+        currentStatusItem && currentStatusItem.claimed_amount,
+        currentStatusItem && currentStatusItem.amount_claimed,
         legacyValue('claim_amount', 'claimed_amount', 'amount_claimed', 'bill_amount'),
         claimAmountFromExtraction,
         '-'
@@ -4283,13 +4434,18 @@
 
       const allInvestigationRows = normalizeInvestigationRows(extractTextByAliases(
         extractionPairs,
-        ['all_investigation_reports_with_values', 'all_investigation_report_lines', 'investigation_finding_in_details', 'investigation', 'lab_results', 'test_results', 'hematology', 'biochemistry', 'deranged_investigation'],
+        ['all_investigation_reports_with_values', 'all_investigation_report_lines', 'investigation_finding_in_details', 'investigation', 'lab_results', 'test_results', 'hematology', 'biochemistry'],
         60
+      ));
+      const structuredDerangedRows = normalizeInvestigationRows(extractTextByAliases(
+        extractionPairs,
+        ['deranged_investigation'],
+        20
       ));
       const dateWiseRows = allInvestigationRows.filter(function (line) {
         return /\b\d{1,2}[\/\-]\d{1,2}[\/\-]\d{2,4}\b/.test(line) || /\b\d{4}[\/\-]\d{2}[\/\-]\d{2}\b/.test(line);
       });
-      const derangedRows = allInvestigationRows.filter(function (line) {
+      const derangedRows = structuredDerangedRows.length ? structuredDerangedRows : allInvestigationRows.filter(function (line) {
         return /\b(high|low|elevated|decreased|abnormal|deranged)\b/i.test(line);
       });
 
@@ -4311,6 +4467,9 @@
             if (/^(?:patient\s*name|hospital\b|add\s*:|address\b|doa\b|dod\b|doa[_\s-]*date\b|dod[_\s-]*date\b|date\s*:|time\s*:|total\b|claimed\b|name\s+of\s+the\s+manager\b|signatures?\b|admission\s*date\b|date\s+of\s+admission\b|discharge\s*date\b|date\s+of\s+discharge\b|consultant\s+name\b|admit(?:ting|ing)\s*dr\b)/i.test(t)) return;
             if (/\b(?:treating\s*doctor|treating_doctor|doctor\s*reg(?:istration)?(?:\s*no|\s*number)?|treating_doctor_registration_number|date\s*of\s*admission|admission\s*date|date\s*of\s*discharge|discharge\s*date)\b/i.test(t)) return;
             if (/\b(?:details?\s+of\s+medication|follow\s*up\s+recommendation|follow\s*up(?:\s*to)?|review\s+after|in\s+case\s+of\s+emergency|call\s+us|contact\s*(?:us|no)?|helpline|ipd\s+medicine\s+bill|medicine\s+name|mobile(?:\s*number)?|phone(?:\s*number)?)\b/i.test(t)) return;
+            if (/^treatment\s+details$/i.test(t)) return;
+            if (isAdministrativeClinicalNoise(t)) return;
+            if (isAdministrativeEvidenceLine(t)) return;
             if (/(?:\+?91[\s\-]*)?[6-9]\d{2}[\s\-]?\d{3}[\s\-]?\d{4}\b/.test(t)) return;
             if (/\b(?:hospital\s*address|full\s*postal\s*address|address\s*of\s*hospital|hospital\s*addr(?:ess)?)\b/i.test(t)) return;
             const commaCount = (t.match(/,/g) || []).length;
@@ -4321,13 +4480,14 @@
             if (/\bhospital\b/i.test(t) && commaCount >= 2 && addressTokenHits >= 1) return;
             if (addressTokenHits >= 2 && (/\d{3,}/.test(t) || /\b(?:pin|pincode|zip)\b/i.test(t))) return;
             if (addressTokenHits >= 1 && commaCount >= 2) return;
+            if (!hasClinicalSignalText(t) && !extractProcedureSummaryText(t) && !/\b(?:procedure|treatment\s+planned|conservative\s+management|medical\s+management)\b/i.test(t)) return;
             const k = t.toLowerCase();
             if (seen.has(k)) return;
             seen.add(k);
             keep.push(t);
           });
         });
-        return keep.length ? keep.slice(0, 24).join('\n') : 'No clinical findings extracted.';
+        return keep.length ? keep.slice(0, 24).join('\n') : (clinicalFallbackSummary || 'No clinical findings extracted.');
       }());
       const allInvestigationText = firstNonEmpty(
         formatInvestigationListForReport(allInvestigationRows, 'No investigation reports available.'),
@@ -4588,6 +4748,10 @@
       function addPair(key, value) {
         const textValue = sanitizeReportText(value);
         if (!textValue || textValue === '-') return;
+        if (/^(?:diagnosis|chief_complaints_at_admission|chief_complaints|chief_complaint|complaints|presenting_complaints|major_diagnostic_finding|clinical_findings)$/i.test(String(key || ''))
+            && isInsuranceHistoryArtifact(textValue)) {
+          return;
+        }
         extractionPairs.push({ key: key, value: textValue });
       }
 
@@ -4600,7 +4764,11 @@
       addPair('admission_date', data.doa);
       addPair('discharge_date', data.dod);
       addPair('diagnosis', data.diagnosis);
-      addPair('chief_complaints', data.complaints);
+      const complaintsValue = firstNonEmpty(data.complaints, data.chief_complaints_at_admission, data.chief_complaint, data.presenting_complaints, '-');
+      addPair('chief_complaints_at_admission', complaintsValue);
+      addPair('chief_complaints', complaintsValue);
+      addPair('major_diagnostic_finding', firstNonEmpty(data.major_diagnostic_finding, data.findings, '-'));
+      addPair('alcoholism_history', data.alcoholism_history);
       addPair('clinical_findings', data.findings);
       addPair('claimed_amount', data.claim_amount);
       addPair('detailed_conclusion', data.conclusion);
@@ -4637,6 +4805,7 @@
 
       const deranged = sanitizeReportText(data.deranged_investigation || '');
       if (deranged && deranged !== '-') {
+        addPair('deranged_investigation', deranged);
         normalizeInvestigationRows(deranged.split(/\r?\n/)).forEach(function (line) {
           const t = sanitizeReportText(line);
           if (t) extractionPairs.push({ key: 'all_investigation_reports_with_values', value: t });
@@ -4666,6 +4835,140 @@
       return buildLegacyReportHtml(new Date().toLocaleString(), String((me && me.username) || ''), mapped.extractionPairs, mapped.evidenceLines || []);
     }
 
+    async function loadStructuredReportJson(forceRefresh) {
+      const result = await apiFetch('/api/v1/claims/' + encodeURIComponent(claimUuid) + '/structured-data', {
+        method: 'POST',
+        body: JSON.stringify({
+          actor_id: String((me && me.username) || 'doctor-ui'),
+          use_llm: true,
+          force_refresh: forceRefresh !== false,
+          require_llm: true,
+        }),
+      });
+      if (!result || typeof result !== 'object') return null;
+      if (!/^(?:llm|verifai)/i.test(String(result.source || ''))) {
+        throw new Error('VerifAI structured extraction was not produced for this claim.');
+      }
+      return {
+        source: 'claim_structured_data',
+        raw_payload: result,
+        company_name: result.company_name,
+        claim_type: result.claim_type,
+        insured_name: result.insured_name,
+        hospital_name: result.hospital_name,
+        treating_doctor: result.treating_doctor,
+        treating_doctor_registration_number: result.treating_doctor_registration_number,
+        doa: result.doa,
+        dod: result.dod,
+        diagnosis: result.diagnosis,
+        complaints: result.complaints,
+        chief_complaints_at_admission: result.complaints,
+        findings: result.findings,
+        major_diagnostic_finding: result.findings,
+        investigation_finding_in_details: result.investigation_finding_in_details,
+        medicine_used: result.medicine_used,
+        high_end_antibiotic_for_rejection: result.high_end_antibiotic_for_rejection,
+        deranged_investigation: result.deranged_investigation,
+        claim_amount: result.claim_amount,
+        conclusion: result.conclusion,
+        recommendation: result.recommendation,
+      };
+    }
+
+    function extractReportRowsFromHtml(reportHtml) {
+      const rows = {};
+      try {
+        const doc = new DOMParser().parseFromString(String(reportHtml || ''), 'text/html');
+        doc.querySelectorAll('tr').forEach(function (tr) {
+          const th = tr.querySelector('th');
+          const td = tr.querySelector('td');
+          if (!th || !td) return;
+          const key = normalizeKey(th.textContent || '');
+          const value = sanitizeReportText(td.textContent || '');
+          if (key && value && !rows[key]) rows[key] = value;
+        });
+      } catch (_err) {
+      }
+      return rows;
+    }
+
+    function reportRowValue(rows, aliases) {
+      for (let i = 0; i < aliases.length; i += 1) {
+        const key = normalizeKey(aliases[i]);
+        if (key && rows[key]) return rows[key];
+      }
+      return '';
+    }
+
+    function numericAmountFromText(value) {
+      const cleaned = String(value || '').replace(/[^0-9.]/g, '');
+      const parsed = Number(cleaned || 0);
+      return Number.isFinite(parsed) ? parsed : 0;
+    }
+
+    function buildMlConclusionPayload(reportHtml) {
+      const rows = extractReportRowsFromHtml(reportHtml);
+      const investigations = {
+        clinical_findings: reportRowValue(rows, ['CLINICAL FINDINGS']),
+        all_investigation_reports: reportRowValue(rows, ['ALL INVESTIGATION REPORTS']),
+        deranged_investigations: reportRowValue(rows, ['DERANGED INVESTIGATION REPORTS']),
+        tpr_chart: reportRowValue(rows, ['DAILY TPR CHART (MIN/MAX)']),
+        medicine_evidence: reportRowValue(rows, ['MEDICINE EVIDENCE USED']),
+      };
+      const treatment = firstNonEmpty(
+        investigations.medicine_evidence,
+        reportRowValue(rows, ['CLINICAL FINDINGS']),
+        'Treatment details not documented'
+      );
+      return {
+        claim_id: String((currentClaim && currentClaim.external_claim_id) || routeClaimId || claimUuid || ''),
+        patient_name: reportRowValue(rows, ['INSURED', 'NAME', 'PATIENT']),
+        chief_complaint: reportRowValue(rows, ['CHIEF COMPLAINTS AT ADMISSION', 'CHIEF COMPLAINTS']),
+        symptoms: reportRowValue(rows, ['MAJOR DIAGNOSTIC FINDING (ADMISSION / DURING STAY)', 'CLINICAL FINDINGS']),
+        diagnosis: reportRowValue(rows, ['DIAGNOSIS']),
+        treatment_given: treatment,
+        investigations: investigations,
+        admission_date: reportRowValue(rows, ['ADMISSION']),
+        discharge_date: reportRowValue(rows, ['DISCHARGE']),
+        los_days: Number(String(reportRowValue(rows, ['LENGTH OF STAY']) || '').match(/\d+/)?.[0] || 0),
+        claim_amount: numericAmountFromText(reportRowValue(rows, ['CLAIMED AMOUNT'])),
+        recommendation: reportRowValue(rows, ['FINAL RECOMMENDATION', 'RECOMMENDATION']),
+      };
+    }
+
+    function replaceReportConclusionHtml(reportHtml, conclusionText) {
+      const cleanConclusion = sanitizeConclusionText(conclusionText);
+      if (!cleanConclusion) return reportHtml;
+      try {
+        const doc = new DOMParser().parseFromString(String(reportHtml || ''), 'text/html');
+        const rows = Array.from(doc.querySelectorAll('tr'));
+        const target = rows.find(function (tr) {
+          const th = tr.querySelector('th');
+          return th && normalizeKey(th.textContent || '') === 'conclusion';
+        });
+        if (!target) return reportHtml;
+        const td = target.querySelector('td');
+        if (!td) return reportHtml;
+        td.textContent = cleanConclusion;
+        return doc.body.innerHTML || reportHtml;
+      } catch (_err) {
+        return reportHtml;
+      }
+    }
+
+    async function applyMlConclusionToReport(reportHtml) {
+      const payload = buildMlConclusionPayload(reportHtml);
+      if (!payload.claim_id || !payload.diagnosis) return reportHtml;
+      const result = await apiFetch('/api/v1/phase5/generate-conclusion', {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      });
+      const conclusion = result && result.data && result.data.conclusion ? String(result.data.conclusion) : '';
+      if (!sanitizeConclusionText(conclusion)) return reportHtml;
+      appendLog('ML conclusion generated using ' + String((result.data && result.data.model) || 'ML model') + '.');
+      return replaceReportConclusionHtml(reportHtml, conclusion);
+    }
+
     let currentClaim = null;
     let currentDocs = [];
     let currentChecklistLatest = { found: false, checklist: [] };
@@ -4673,6 +4976,192 @@
     let currentVerifaiReport = null;
     let hasGeneratedReport = false;
     let latestGeneratedReportHtml = '';
+    function coalesceExtractedEntity(entities, keys) {
+      if (!entities || typeof entities !== 'object' || !Array.isArray(keys)) return '';
+      for (let i = 0; i < keys.length; i += 1) {
+        const value = entities[keys[i]];
+        if (value == null) continue;
+        if (Array.isArray(value)) {
+          const joined = value.map(function (item) {
+            if (item && typeof item === 'object') return Object.values(item).filter(Boolean).join(' ');
+            return String(item || '');
+          }).filter(Boolean).join('\n');
+          if (sanitizeReportText(joined)) return joined;
+          continue;
+        }
+        if (value && typeof value === 'object') {
+          const flattened = Object.values(value).filter(Boolean).join('\n');
+          if (sanitizeReportText(flattened)) return flattened;
+          continue;
+        }
+        if (sanitizeReportText(value)) return String(value);
+      }
+      return '';
+    }
+
+    function syncVerifaiReportFromExtraction(result) {
+      const entities = result && result.extracted_entities && typeof result.extracted_entities === 'object'
+        ? result.extracted_entities
+        : null;
+      if (!entities) return;
+      currentVerifaiReport = {
+        ...(currentVerifaiReport || {}),
+        verifai_status: 'processed',
+        verifai_stage: 'completed',
+        local_extraction: true,
+        report_json: {
+          source: 'local_verifai_extraction',
+          raw_payload: result || {},
+          insured_name: coalesceExtractedEntity(entities, ['insured_name', 'patient_name', 'beneficiary_name', 'name']),
+          hospital_name: coalesceExtractedEntity(entities, ['hospital_name', 'provider_name', 'hospital']),
+          treating_doctor: coalesceExtractedEntity(entities, ['treating_doctor', 'treating_doctor_name', 'doctor_name', 'attending_doctor', 'consultant_doctor', 'consulting_doctor', 'primary_doctor', 'consultant_name', 'admitting_doctor', 'admitting_dr', 'treating_consultant', 'doctor']),
+          treating_doctor_registration_number: coalesceExtractedEntity(entities, ['treating_doctor_registration_number', 'doctor_registration_number', 'treating_doctor_reg_no', 'doctor_reg_no', 'registration_no', 'reg_no', 'registration_number', 'registration', 'medical_registration_number', 'doctor_medical_registration_number', 'council_registration_number', 'registration_number_of_doctor', 'mci_reg_no', 'nmc_reg_no']),
+          doa: coalesceExtractedEntity(entities, ['doa', 'admission_date', 'date_of_admission']),
+          dod: coalesceExtractedEntity(entities, ['dod', 'discharge_date', 'date_of_discharge']),
+          diagnosis: coalesceExtractedEntity(entities, ['diagnosis', 'diagnosis_name', 'provisional_diagnosis', 'final_diagnosis']),
+          complaints: coalesceExtractedEntity(entities, ['chief_complaints_at_admission', 'chief_complaints', 'chief_complaint', 'presenting_complaints', 'complaints']),
+          chief_complaints_at_admission: coalesceExtractedEntity(entities, ['chief_complaints_at_admission', 'chief_complaints', 'chief_complaint', 'presenting_complaints', 'complaints']),
+          findings: coalesceExtractedEntity(entities, ['findings', 'clinical_findings', 'examination_findings']),
+          medicine_used: coalesceExtractedEntity(entities, ['medicine_used', 'medicines', 'medications', 'treatment_medicines', 'prescription']),
+          investigation_finding_in_details: coalesceExtractedEntity(entities, ['investigation_finding_in_details', 'investigations', 'investigation', 'lab_results', 'test_results', 'all_investigation_reports_with_values']),
+          claim_amount: coalesceExtractedEntity(entities, ['claim_amount', 'claimed_amount', 'bill_amount', 'total_amount']),
+          clinical_justification: coalesceExtractedEntity(entities, ['clinical_justification', 'justification', 'summary', 'medical_summary']),
+        },
+      };
+      renderVerifaiDoctorBucket();
+      setActionDisabled(false);
+    }
+
+    function pickEntityValueFromResults(results, keys, validator) {
+      const seen = new Set();
+      const items = Array.isArray(results) ? results : [];
+      for (let r = 0; r < items.length; r += 1) {
+        const entities = items[r] && items[r].extracted_entities && typeof items[r].extracted_entities === 'object'
+          ? items[r].extracted_entities
+          : {};
+        for (let k = 0; k < keys.length; k += 1) {
+          const key = keys[k];
+          const value = coalesceExtractedEntity(entities, [key]);
+          const text = sanitizeReportText(value);
+          if (!text || text === '-') continue;
+          const norm = normalizeEntityText(text);
+          if (seen.has(norm)) continue;
+          seen.add(norm);
+          if (typeof validator === 'function' && !validator(text, entities, items[r])) continue;
+          return text;
+        }
+      }
+      return '';
+    }
+
+    function mergeExtractionResultsForReport(results) {
+      const items = Array.isArray(results) ? results : [];
+      const patientName = pickEntityValueFromResults(items, ['patient_name', 'insured_name', 'name', 'beneficiary_name'], function (value) {
+        return !isLikelyOrgName(value);
+      });
+      const hospitalFromTags = (currentClaim && Array.isArray(currentClaim.tags) && currentClaim.tags.length > 2 && isLikelyOrgName(currentClaim.tags[2]))
+        ? sanitizeReportText(currentClaim.tags[2])
+        : '';
+      const hospitalName = firstNonEmpty(
+        hospitalFromTags,
+        pickEntityValueFromResults(items, ['hospital_name', 'provider_name', 'hospital', 'treating_hospital', 'facility_name'], function (value) {
+          return !isSameEntityText(value, patientName) && isLikelyOrgName(value);
+        }),
+        ''
+      );
+      const doctorFromRegSlot = pickEntityValueFromResults(items, ['doctor_registration_number', 'treating_doctor_registration_number', 'doctor_reg_no'], function (value) {
+        return !!doctorNameFromMisfiledRegistration(value);
+      });
+      const treatingDoctor = firstNonEmpty(
+        pickEntityValueFromResults(items, ['treating_doctor', 'treating_doctor_name', 'doctor_name', 'attending_doctor', 'consultant_doctor', 'consultant_name', 'admitting_doctor', 'admitting_dr'], function (value) {
+          const normalized = normalizeDoctorNameCandidate(value);
+          return !!normalized && !isSameEntityText(normalized, patientName) && !isSameEntityText(normalized, hospitalName) && !isLikelyOrgName(normalized);
+        }),
+        doctorNameFromMisfiledRegistration(doctorFromRegSlot),
+        ''
+      );
+      const registrationNumber = pickEntityValueFromResults(items, ['treating_doctor_registration_number', 'doctor_registration_number', 'doctor_reg_no', 'registration_no', 'reg_no', 'registration_number', 'mci_reg_no', 'nmc_reg_no'], function (value) {
+        return isLikelyDoctorRegNo(value) && !isSameEntityText(value, treatingDoctor) && !isSameEntityText(value, patientName);
+      });
+      const clinicalFindings = pickEntityValueFromResults(items, ['clinical_findings', 'major_diagnostic_finding', 'findings'], function (value) {
+        return !isAdministrativeClinicalNoise(value) || hasClinicalSignalText(value) || !!extractProcedureSummaryText(value);
+      });
+      const procedureText = extractProcedureSummaryText(clinicalFindings)
+        || pickEntityValueFromResults(items, ['procedure_treatment_planned', 'procedure', 'treatment_planned', 'treatment'], function (value) { return !!sanitizeReportText(value); });
+      const findingsParts = [];
+      const findingClean = sanitizeReportText(clinicalFindings);
+      if (findingClean && findingClean !== '-') findingsParts.push(findingClean);
+      if (procedureText && !findingsParts.some(function (part) { return isSameEntityText(part, procedureText); })) {
+        findingsParts.push('Procedure / Treatment Planned: ' + procedureText);
+      }
+      const mergedComplaints = pickEntityValueFromResults(items, ['chief_complaints_at_admission', 'chief_complaints', 'chief_complaint', 'complaints', 'presenting_complaints'], function (value) {
+        return !isInsuranceHistoryArtifact(value);
+      });
+      return {
+        source: 'merged_document_extractions',
+        raw_payload: { extraction_count: items.length },
+        insured_name: patientName,
+        hospital_name: hospitalName,
+        treating_doctor: treatingDoctor,
+        treating_doctor_registration_number: registrationNumber,
+        doa: pickEntityValueFromResults(items, ['admission_date', 'date_of_admission', 'doa', 'doa_date']),
+        dod: pickEntityValueFromResults(items, ['discharge_date', 'date_of_discharge', 'dod', 'dod_date']),
+        diagnosis: pickEntityValueFromResults(items, ['diagnosis', 'final_diagnosis', 'provisional_diagnosis', 'primary_diagnosis'], function (value) {
+          return !isInsuranceHistoryArtifact(value);
+        }),
+        complaints: mergedComplaints,
+        chief_complaints_at_admission: mergedComplaints,
+        findings: findingsParts.join('\n'),
+        medicine_used: pickEntityValueFromResults(items, ['medicine_used', 'medicines', 'medications', 'treatment_medicines', 'prescription']),
+        investigation_finding_in_details: pickEntityValueFromResults(items, ['all_investigation_reports_with_values', 'all_investigation_report_lines', 'investigation_finding_in_details', 'investigations', 'lab_results', 'test_results']),
+        claim_amount: pickEntityValueFromResults(items, ['claim_amount', 'claimed_amount', 'bill_amount', 'total_amount']),
+        clinical_justification: pickEntityValueFromResults(items, ['clinical_justification', 'justification']),
+        conclusion: pickEntityValueFromResults(items, ['detailed_conclusion', 'conclusion'], function (value) {
+          return !/\bauthorize\s+inr\b/i.test(value) && !/\bfinal bill\b/i.test(value);
+        }),
+      };
+    }
+
+    async function hydrateReportFromExistingExtraction(docs, forceMerge) {
+      if (hasVerifaiReportJsonReady() && !forceMerge) return true;
+      const rawDocs = Array.isArray(docs) ? docs : currentDocs;
+      const eligibleDocs = (Array.isArray(rawDocs) ? rawDocs : []).filter(function (doc) {
+        const docId = String((doc && doc.id) || '').trim();
+        const docName = String((doc && doc.file_name) || '').trim();
+        return !!docId && !isKycIdentityDocName(docName);
+      });
+      const extractionResults = [];
+      for (let idx = 0; idx < eligibleDocs.length; idx += 1) {
+        const doc = eligibleDocs[idx] || {};
+        const docId = String(doc.id || '').trim();
+        if (!docId) continue;
+        try {
+          const existing = await apiFetch('/api/v1/documents/' + encodeURIComponent(docId) + '/extractions?limit=1&offset=0');
+          const items = Array.isArray(existing && existing.items) ? existing.items : [];
+          if (items.length > 0 && items[0] && items[0].extracted_entities) {
+            extractionResults.push(items[0]);
+          }
+        } catch (err) {
+          appendLog('Existing extraction hydrate skipped for document ' + String(doc.file_name || docId) + ': ' + String(err && err.message ? err.message : err));
+        }
+      }
+      if (extractionResults.length > 0) {
+        currentVerifaiReport = {
+          ...(currentVerifaiReport || {}),
+          verifai_status: 'processed',
+          verifai_stage: 'completed',
+          local_extraction: true,
+          report_json: mergeExtractionResultsForReport(extractionResults),
+        };
+        hasExtractedData = true;
+        renderVerifaiDoctorBucket();
+        setActionDisabled(false);
+        appendLog('Report fields merged from ' + String(extractionResults.length) + ' existing document extraction(s).');
+        return hasVerifaiReportJsonReady();
+      }
+      return hasVerifaiReportJsonReady();
+    }
+
     async function refreshCurrentVerifaiReport(options) {
       const opts = options || {};
       const syncActions = opts.syncActions !== false;
@@ -4693,7 +5182,10 @@
       const url = '/api/v1/integrations/verifai/claims/' + encodeURIComponent(claimUuidText) + '/report-json' + (query.toString() ? ('?' + query.toString()) : '');
 
       try {
-        currentVerifaiReport = await apiFetch(url);
+        const nextReport = await apiFetch(url);
+        const nextHasReport = !!(nextReport && typeof nextReport.report_json === 'object' && nextReport.report_json && Object.keys(nextReport.report_json).length > 0);
+        const previousHasReport = !!(previousPayload && previousPayload.local_extraction === true && previousPayload.report_json && typeof previousPayload.report_json === 'object' && Object.keys(previousPayload.report_json).length > 0);
+        currentVerifaiReport = (!nextHasReport && previousHasReport) ? previousPayload : nextReport;
         renderVerifaiDoctorBucket();
         if (syncActions) setActionDisabled(false);
         return currentVerifaiReport;
@@ -5211,6 +5703,7 @@
       summaryEl.innerHTML = detailRows.join('');
       currentStatusItem = statusItem || {};
       currentVerifaiReport = null;
+      hasExtractedData = false;
       renderVerifaiDoctorBucket();
       setActionDisabled(false);
 
@@ -5233,6 +5726,23 @@
       const docs = Array.isArray(docsResult && docsResult.items) ? docsResult.items : [];
       currentDocs = docs;
       currentChecklistLatest = checklistLatest || { found: false, checklist: [] };
+      hasExtractedData = docs.some(function (doc) {
+        const status = String((doc && doc.parse_status) || '').toLowerCase();
+        return ['succeeded', 'success', 'parsed', 'extracted', 'completed'].includes(status);
+      });
+      if (!hasExtractedData && docs.length > 0) {
+        try {
+          const extractionCoverage = await checkExistingExtractionCoverage(docs);
+          hasExtractedData = Number(extractionCoverage && extractionCoverage.withExtractionCount ? extractionCoverage.withExtractionCount : 0) > 0;
+        } catch (coverageErr) {
+          appendLog('Existing extraction check failed: ' + String(coverageErr && coverageErr.message ? coverageErr.message : coverageErr));
+        }
+      }
+      if (hasExtractedData) {
+        appendLog('Existing document extraction found. Report generation enabled.');
+        await hydrateReportFromExistingExtraction(docs, true);
+        setActionDisabled(false);
+      }
       const docRows = docs.map(function (doc) {
         return '<tr>'
           + '<td>' + escapeHtml(doc.file_name || '-') + '</td>'
@@ -5258,6 +5768,201 @@
           }
         });
       });
+
+      const verifyExtractBtn = document.getElementById('case-verify-extract');
+      const forceVerifaiBtn = document.getElementById('case-force-verifai');
+      const progressDiv = document.getElementById('case-extraction-progress');
+      const progressBar = document.getElementById('case-extraction-bar');
+      const progressStatus = document.getElementById('case-extraction-status');
+      let activeExtractionTimer = null;
+
+      function stopExtractionProgressTimer() {
+        if (activeExtractionTimer) {
+          window.clearInterval(activeExtractionTimer);
+          activeExtractionTimer = null;
+        }
+      }
+
+      function startExtractionProgressTimer(label) {
+        const startedAt = Date.now();
+        stopExtractionProgressTimer();
+        const tick = function () {
+          if (progressStatus) {
+            progressStatus.textContent = label + ' - still working (' + formatElapsedClock(Date.now() - startedAt) + ')';
+          }
+        };
+        tick();
+        activeExtractionTimer = window.setInterval(tick, 1000);
+      }
+
+      console.log('Button elements found:', {
+        verifyExtractBtn: !!verifyExtractBtn,
+        forceVerifaiBtn: !!forceVerifaiBtn,
+        progressDiv: !!progressDiv,
+        docs: docs.length,
+        me: me && me.username
+      });
+
+      if (docs.length > 0) {
+        if (verifyExtractBtn) {
+          verifyExtractBtn.disabled = false;
+          verifyExtractBtn.removeAttribute('disabled');
+          console.log('Verify button enabled', { disabled: verifyExtractBtn.disabled, hasDisabledAttr: verifyExtractBtn.hasAttribute('disabled') });
+        }
+        if (forceVerifaiBtn) {
+          forceVerifaiBtn.disabled = false;
+          forceVerifaiBtn.removeAttribute('disabled');
+          console.log('Force VerifAI button enabled', { disabled: forceVerifaiBtn.disabled, hasDisabledAttr: forceVerifaiBtn.hasAttribute('disabled') });
+        }
+      }
+
+      if (verifyExtractBtn) {
+        console.log('Attaching click listener to Verify button');
+        verifyExtractBtn.addEventListener('click', async function (event) {
+          console.log('Verify button CLICKED', event);
+          if (docs.length === 0) {
+            setMessage('case-detail-msg', 'err', 'No documents found for extraction.');
+            return;
+          }
+          const docId = docs[0].id;
+          const docName = docs[0].file_name;
+          console.log('Starting Verify extraction for document:', docId, docName);
+          try {
+            verifyExtractBtn.disabled = true;
+            verifyExtractBtn.textContent = 'Extracting...';
+            if (progressDiv) progressDiv.style.display = 'block';
+            if (progressStatus) progressStatus.textContent = 'Extracting: ' + docName;
+            if (progressBar) progressBar.style.width = '30%';
+            setMessage('case-detail-msg', '', 'Starting extraction for: ' + docName);
+            console.log('Sending extraction request to:', '/api/v1/documents/' + encodeURIComponent(docId) + '/extract');
+            console.log('Request payload:', { provider: 'openai', actor_id: me && me.username ? me.username : '', force_refresh: false });
+            startExtractionProgressTimer('Extracting: ' + docName);
+            const result = await apiFetch('/api/v1/documents/' + encodeURIComponent(docId) + '/extract', {
+              method: 'POST',
+              body: JSON.stringify({ provider: 'openai', actor_id: me && me.username ? me.username : '', force_refresh: false }),
+            });
+            stopExtractionProgressTimer();
+            console.log('Extraction result:', result);
+            console.log('Extracted entities:', result && result.extracted_entities ? result.extracted_entities : 'NONE');
+            syncVerifaiReportFromExtraction(result);
+            if (progressBar) progressBar.style.width = '100%';
+            if (progressStatus) progressStatus.textContent = 'Extraction completed! Displaying data...';
+            setMessage('case-detail-msg', 'ok', 'Extraction completed. Data extracted below.');
+
+            // Display extracted entities in VerifAI Doctor Bucket
+            if (verifaiReportEl && result && result.extracted_entities) {
+              const entities = result.extracted_entities;
+              let html = '<div style="border:1px solid #c7d2fe;border-radius:16px;padding:16px 18px;background:linear-gradient(180deg,#f8fbff 0%,#eef6ff 100%);box-shadow:0 8px 20px rgba(15,23,42,0.06);">'
+                + '<div style="font-size:14px;font-weight:800;color:#1d4ed8;margin-bottom:12px;">✅ Extraction Completed</div>';
+
+              if (entities.name) html += '<div style="padding:8px 0;border-top:1px solid #e5e7eb;"><strong>Name:</strong> ' + escapeHtml(String(entities.name).substring(0, 100)) + '</div>';
+              if (entities.diagnosis) html += '<div style="padding:8px 0;border-top:1px solid #e5e7eb;"><strong>Diagnosis:</strong> ' + escapeHtml(String(entities.diagnosis).substring(0, 100)) + '</div>';
+              if (entities.bill_amount) html += '<div style="padding:8px 0;border-top:1px solid #e5e7eb;"><strong>Bill Amount:</strong> ' + escapeHtml(String(entities.bill_amount).substring(0, 100)) + '</div>';
+              html += '</div>';
+              verifaiReportEl.className = 'case-generated-report';
+              verifaiReportEl.innerHTML = html;
+
+            }
+
+            // Enable Generate Report button
+            const genReportBtn = document.getElementById('case-generate-report');
+            if (genReportBtn) {
+              genReportBtn.disabled = false;
+              console.log('✅ GENERATE REPORT BUTTON ENABLED');
+            }
+            console.log('✅ READY FOR NEXT STEP - extraction data displayed above');
+          } catch (err) {
+            stopExtractionProgressTimer();
+            console.error('Extraction error:', err);
+            setMessage('case-detail-msg', 'err', 'Extraction failed: ' + (err.message || String(err)));
+            return;
+          }
+
+          hasExtractedData = true;
+          setActionDisabled(false);
+          if (progressDiv) progressDiv.style.display = 'none';
+        });
+      }
+
+      if (forceVerifaiBtn) {
+        console.log('Attaching click listener to Force VerifAI button');
+        forceVerifaiBtn.addEventListener('click', async function (event) {
+          console.log('Force VerifAI button CLICKED', event);
+          if (docs.length === 0) {
+            setMessage('case-detail-msg', 'err', 'No documents found for extraction.');
+            return;
+          }
+          console.log('Starting Force VerifAI extraction for ' + docs.length + ' document(s)');
+          forceVerifaiBtn.disabled = true;
+          forceVerifaiBtn.textContent = 'Re-extracting...';
+          if (progressDiv) progressDiv.style.display = 'block';
+
+          // Extract ALL documents
+          for (let i = 0; i < docs.length; i++) {
+            const docId = docs[i].id;
+            const docName = docs[i].file_name;
+            console.log('Extracting document ' + (i+1) + ' of ' + docs.length + ':', docId, docName);
+            try {
+              if (progressStatus) progressStatus.textContent = 'Force re-extracting: ' + docName + ' (' + (i+1) + '/' + docs.length + ')';
+              if (progressBar) progressBar.style.width = ((i+1)/docs.length*100) + '%';
+              setMessage('case-detail-msg', '', 'Force re-extracting: ' + docName);
+              console.log('Sending force extraction request to:', '/api/v1/documents/' + encodeURIComponent(docId) + '/extract');
+              console.log('Request payload:', { provider: 'openai', actor_id: me && me.username ? me.username : '', force_refresh: true });
+              startExtractionProgressTimer('Force re-extracting: ' + docName + ' (' + (i+1) + '/' + docs.length + ')');
+              const result = await apiFetch('/api/v1/documents/' + encodeURIComponent(docId) + '/extract', {
+                method: 'POST',
+                body: JSON.stringify({ provider: 'openai', actor_id: me && me.username ? me.username : '', force_refresh: true }),
+              });
+            stopExtractionProgressTimer();
+            console.log('✅ EXTRACTION_SUCCESS - Force extraction completed');
+            console.log('Force extraction result:', result);
+            console.log('Extracted entities:', result && result.extracted_entities ? result.extracted_entities : 'NONE');
+            syncVerifaiReportFromExtraction(result);
+            if (progressBar) progressBar.style.width = '100%';
+            if (progressStatus) progressStatus.textContent = 'Re-extraction completed! Displaying data...';
+            setMessage('case-detail-msg', 'ok', 'Document re-extracted successfully. Data extracted below.');
+
+            // Display extracted entities in VerifAI Doctor Bucket
+            if (verifaiReportEl && result && result.extracted_entities) {
+              const entities = result.extracted_entities;
+              let html = '<div style="border:1px solid #c7d2fe;border-radius:16px;padding:16px 18px;background:linear-gradient(180deg,#f8fbff 0%,#eef6ff 100%);box-shadow:0 8px 20px rgba(15,23,42,0.06);">'
+                + '<div style="font-size:14px;font-weight:800;color:#1d4ed8;margin-bottom:12px;">✅ Extraction Completed</div>';
+
+              if (entities.name) html += '<div style="padding:8px 0;border-top:1px solid #e5e7eb;"><strong>Name:</strong> ' + escapeHtml(String(entities.name).substring(0, 100)) + '</div>';
+              if (entities.diagnosis) html += '<div style="padding:8px 0;border-top:1px solid #e5e7eb;"><strong>Diagnosis:</strong> ' + escapeHtml(String(entities.diagnosis).substring(0, 100)) + '</div>';
+              if (entities.bill_amount) html += '<div style="padding:8px 0;border-top:1px solid #e5e7eb;"><strong>Bill Amount:</strong> ' + escapeHtml(String(entities.bill_amount).substring(0, 100)) + '</div>';
+              html += '</div>';
+              verifaiReportEl.className = 'case-generated-report';
+              verifaiReportEl.innerHTML = html;
+
+            }
+
+            // Enable Generate Report button
+            const genReportBtn = document.getElementById('case-generate-report');
+            if (genReportBtn) {
+              genReportBtn.disabled = false;
+              console.log('✅ GENERATE REPORT BUTTON ENABLED');
+            }
+              console.log('✅ Document ' + (i+1) + ' extraction completed');
+            } catch (err) {
+              stopExtractionProgressTimer();
+              console.error('Force extraction error on document ' + (i+1) + ':', err);
+              setMessage('case-detail-msg', 'err', 'Re-extraction failed on document ' + (i+1) + ': ' + (err.message || String(err)));
+            }
+          }
+
+          // Mark completion after all extractions
+          stopExtractionProgressTimer();
+          hasExtractedData = true;
+          setActionDisabled(false);
+          if (progressDiv) progressDiv.style.display = 'none';
+          if (progressStatus) progressStatus.textContent = 'All documents re-extracted!';
+          setMessage('case-detail-msg', 'ok', 'All documents re-extracted successfully!');
+          forceVerifaiBtn.disabled = false;
+          forceVerifaiBtn.textContent = 'Force VerifAI';
+          console.log('✅ ALL FORCE EXTRACTIONS COMPLETED');
+        });
+      }
       const loadedPreferred = await loadSavedReportBySource(preferredReportSource, true, { allowStale: false });
       if (!loadedPreferred && preferredReportSource === 'doctor') {
         await loadSavedReportBySource('system', true, { allowStale: false });
@@ -5286,16 +5991,44 @@
       appendLog('Generate Report started.');
 
       try {
+        stageText = 'Generating structured extraction from S3 documents...';
+        renderProgress();
+        try {
+          const structuredReport = await loadStructuredReportJson(true);
+          if (structuredReport && Object.keys(structuredReport).length > 0) {
+            currentVerifaiReport = {
+              ...(currentVerifaiReport || {}),
+              verifai_status: 'processed',
+              verifai_stage: 'structured',
+              local_extraction: true,
+              report_json: structuredReport,
+            };
+            hasExtractedData = true;
+            appendLog('Structured report data generated from S3 document extraction.');
+          }
+        } catch (structuredErr) {
+          const structuredMsg = 'VerifAI structured extraction failed: ' + String(structuredErr && structuredErr.message ? structuredErr.message : structuredErr);
+          setMessage('case-detail-msg', 'err', structuredMsg);
+          appendLog(structuredMsg);
+          if (reportTab && !reportTab.closed) renderReportLoadingTab(reportTab, structuredMsg, formatElapsedClock(Date.now() - startedAt));
+          return;
+        }
+
         stageText = 'Refreshing latest VerifAI JSON...';
         renderProgress();
         try {
-          await refreshCurrentVerifaiReport({ keepPreviousOnError: true, syncActions: false });
-          appendLog('Latest VerifAI JSON refreshed before report generation.');
+          const hasStructuredReport = hasVerifaiReportJsonReady() && currentVerifaiReport && currentVerifaiReport.local_extraction === true;
+          if (!hasStructuredReport) {
+            await refreshCurrentVerifaiReport({ keepPreviousOnError: true, syncActions: false });
+            appendLog('Latest VerifAI JSON refreshed before report generation.');
+          } else {
+            appendLog('Skipping VerifAI refresh because structured extraction is ready.');
+          }
         } catch (refreshReportErr) {
           appendLog('Latest VerifAI JSON refresh before report generation failed: ' + String(refreshReportErr && refreshReportErr.message ? refreshReportErr.message : refreshReportErr));
         }
 
-        if (!hasVerifaiReportJsonReady()) {
+        if (!hasVerifaiReportJsonReady() && !hasExtractedData) {
           appendLog('VerifAI JSON is not ready yet. Waiting for latest report from VerifAI.');
           const waitResult = await waitForVerifaiReportJson({
             timeoutMs: 180000,
@@ -5319,10 +6052,26 @@
             }
             return;
           }
+        } else if (hasExtractedData) {
+          appendLog('Using extracted document data for report generation.');
+        }
+
+        if (hasExtractedData) {
+          const hasStructuredReport = hasVerifaiReportJsonReady()
+            && currentVerifaiReport
+            && currentVerifaiReport.local_extraction === true
+            && currentVerifaiReport.verifai_stage === 'structured';
+          if (hasStructuredReport) {
+            appendLog('Using structured report data; raw extraction merge skipped.');
+          } else {
+            stageText = 'Loading existing document extraction...';
+            renderProgress();
+            await hydrateReportFromExistingExtraction(currentDocs, true);
+          }
         }
 
         const aiInputState = getVerifaiAiInputState();
-        if (aiInputState.thin) {
+        if (aiInputState.thin && !hasExtractedData) {
           setMessage('case-detail-msg', 'err', 'No AI input available from VerifAI.');
           appendLog('Report generation stopped because VerifAI input is missing or too thin.');
           if (reportTab && !reportTab.closed) renderReportLoadingTab(reportTab, 'No AI input from VerifAI.', formatElapsedClock(Date.now() - startedAt));
@@ -5357,11 +6106,11 @@
           appendLog('Checklist refresh before report generation failed: ' + String(refreshErr && refreshErr.message ? refreshErr.message : refreshErr));
         }
 
-        stageText = 'Generating report from VerifAI JSON...';
+        stageText = hasExtractedData ? 'Generating report from document extraction...' : 'Generating report from VerifAI JSON...';
         renderProgress();
         latestGeneratedReportHtml = await buildLegacyReportHtmlFromLatestData();
         if (!String(latestGeneratedReportHtml || '').trim()) {
-          const reportErrMsg = 'Could not build report from VerifAI JSON.';
+          const reportErrMsg = hasExtractedData ? 'Could not build report from existing document extraction.' : 'Could not build report from VerifAI JSON.';
           setMessage('case-detail-msg', 'err', reportErrMsg);
           appendLog(reportErrMsg);
           renderReportLoadingTab(reportTab, reportErrMsg, formatElapsedClock(Date.now() - startedAt));
@@ -5370,6 +6119,14 @@
           } catch (_err) {
           }
           return;
+        }
+
+        stageText = 'Generating ML conclusion...';
+        renderProgress();
+        try {
+          latestGeneratedReportHtml = await applyMlConclusionToReport(latestGeneratedReportHtml);
+        } catch (mlErr) {
+          appendLog('ML conclusion generation skipped: ' + String(mlErr && mlErr.message ? mlErr.message : mlErr));
         }
 
         stageText = 'Finalizing report...';

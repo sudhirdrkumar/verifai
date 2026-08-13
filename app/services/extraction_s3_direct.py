@@ -102,19 +102,38 @@ def _call_openai_with_s3_url(
     safe_mime = (mime_type or "application/pdf").strip().lower()
     is_image = safe_mime.startswith("image/")
 
+    logger.info(f"S3DIRECT_DEBUG: _call_openai_with_s3_url called: document={safe_name}, raw_mime={mime_type}, safe_mime={safe_mime}, is_image={is_image}")
+
     # Build user content with S3 URL instead of embedded file
     user_prompt = (
-        "Extract structured data from this medical claim document. Return strict JSON only.\n\n"
+        "Extract structured data from this medical claim document for a health-claim assessment sheet. Return strict JSON only.\n"
+        "Keep complaints, diagnosis, clinical findings, investigations, TPR/vitals, medicines, and conclusion fields separate.\n"
+        "Do not put patient name as hospital/vendor/doctor. Use '-' for unknown values.\n\n"
         "JSON schema:\n"
         "{\n"
         '  "extracted_entities": {\n'
         '    "name": "",\n'
+        '    "patient_name": "",\n'
         '    "hospital_name": "",\n'
         '    "pharmacy_name": "",\n'
+        '    "treating_doctor": "",\n'
+        '    "doctor_registration_number": "",\n'
+        '    "admission_date": "",\n'
+        '    "discharge_date": "",\n'
         '    "claim_amount": "",\n'
         '    "diagnosis": "",\n'
+        '    "chief_complaints_at_admission": "",\n'
+        '    "major_diagnostic_finding": "",\n'
+        '    "alcoholism_history": "",\n'
+        '    "clinical_findings": "",\n'
+        '    "all_investigation_reports_with_values": [],\n'
+        '    "date_wise_investigation_reports": [],\n'
+        '    "deranged_investigation_reports": [],\n'
+        '    "daily_tpr_chart_min_max": "",\n'
         '    "medicine_used": "",\n'
-        '    "bill_amount": ""\n'
+        '    "bill_amount": "",\n'
+        '    "detailed_conclusion": "",\n'
+        '    "recommendation": ""\n'
         "  },\n"
         '  "evidence_refs": [{"type":"text","field":"","snippet":""}],\n'
         '  "confidence": 0.0\n'
@@ -132,11 +151,31 @@ def _call_openai_with_s3_url(
             "image_url": {"url": s3_url}
         })
     else:
-        # For PDFs, use document_url type (if supported)
-        user_content.append({
-            "type": "text",
-            "text": f"Document URL: {s3_url}\n\nPlease extract from the document at this URL."
-        })
+        # For PDFs, download from S3 and send as base64
+        import base64
+        try:
+            response = httpx.get(s3_url, timeout=60)
+            response.raise_for_status()
+            pdf_data = response.content
+            pdf_base64 = base64.standard_b64encode(pdf_data).decode('utf-8')
+
+            user_content.append({
+                "type": "document",
+                "document": {
+                    "type": "application/pdf",
+                    "source": {
+                        "type": "base64",
+                        "media_type": "application/pdf",
+                        "data": pdf_base64
+                    }
+                }
+            })
+        except Exception as e:
+            logger.warning(f"Failed to download PDF from S3 URL for base64 encoding: {e}. Using URL text fallback.")
+            user_content.append({
+                "type": "text",
+                "text": f"Document URL: {s3_url}\n\nPlease extract from the document at this URL."
+            })
 
     base_url = (
         settings.openai_base_url.rstrip("/")

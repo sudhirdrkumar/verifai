@@ -131,6 +131,59 @@ def _safe_json(value: Any, default: Any) -> Any:
     return default
 
 
+def _looks_like_insurance_history_artifact(value: Any) -> bool:
+    low = _normalize_space_text(value).lower()
+    if not low:
+        return False
+    if re.search(r"\bpreviously\s+covered\s+by\s+any\s+other\s+mediclaim\b", low):
+        return True
+    if re.search(r"\bself\s+inflicted\s+road\s+traffic\s+accident\b", low):
+        return True
+    if re.search(r"\bsubstance\s+abuse\s*/?\s*alcohol\s+consumption\b", low):
+        return True
+    if re.search(r"\bdetails\s+of\s+insurance\s+history\b", low) and not re.search(
+        r"\b(?:pregnancy|labou?r|lscs|caesarean|cesarean|fetus|foetus|uterine|pv\s*-?\s*water|abdomen|delivery)\b",
+        low,
+    ):
+        return True
+    return False
+
+
+def _sanitize_entities_for_structuring(entities: dict[str, Any]) -> dict[str, Any]:
+    cleaned = dict(entities or {})
+    clinical_context = _normalize_space_text(
+        "\n".join(
+            _txt(cleaned.get(key))
+            for key in (
+                "diagnosis",
+                "chief_complaints_at_admission",
+                "chief_complaints",
+                "clinical_findings",
+                "major_diagnostic_finding",
+                "procedure",
+                "treatment",
+            )
+        )
+    ).lower()
+    maternity_context = bool(
+        re.search(r"\b(?:pregnancy|labou?r|lscs|caesarean|cesarean|fetus|foetus|uterine|pv\s*-?\s*water|delivery)\b", clinical_context)
+    )
+    for key in (
+        "diagnosis",
+        "chief_complaints_at_admission",
+        "chief_complaints",
+        "chief_complaint",
+        "presenting_complaints",
+        "complaints",
+        "clinical_findings",
+        "major_diagnostic_finding",
+        "detailed_conclusion",
+    ):
+        if key in cleaned and _looks_like_insurance_history_artifact(cleaned.get(key)) and not maternity_context:
+            cleaned[key] = ""
+    return cleaned
+
+
 def _norm_key(value: Any) -> str:
     return re.sub(r"[^a-z0-9]+", "", _txt(value).lower())
 
@@ -1601,6 +1654,7 @@ def _load_context(db: Session, claim_id: UUID) -> dict[str, Any]:
         text(
             """
             SELECT c.id, c.external_claim_id, c.patient_name, c.patient_identifier,
+                   c.tags,
                    c.status, c.assigned_doctor_id, l.legacy_payload
             FROM claims c
             LEFT JOIN claim_legacy_data l ON l.claim_id = c.id
@@ -1663,7 +1717,7 @@ def _load_context(db: Session, claim_id: UUID) -> dict[str, Any]:
     for row in docs:
         entities = _safe_json(row.get("extracted_entities"), {})
         if isinstance(entities, dict) and entities:
-            entity_docs.append(entities)
+            entity_docs.append(_sanitize_entities_for_structuring(entities))
         refs = _safe_json(row.get("evidence_refs"), [])
         if isinstance(refs, list):
             for item in refs:
@@ -1680,12 +1734,13 @@ def _load_context(db: Session, claim_id: UUID) -> dict[str, Any]:
         "decision": dict(decision) if decision else {},
         "entity_docs": entity_docs,
         "evidence_lines": _dedupe(evidence_lines)[:300],
-        "latest_report_text": _strip_html((latest_report or {}).get("report_markdown")) if latest_report else "",
+        "latest_report_text": "",
     }
 
 
 def _heuristic_fields(ctx: dict[str, Any]) -> dict[str, str]:
     claim = ctx.get("claim") or {}
+    claim_tags = claim.get("tags") if isinstance(claim.get("tags"), list) else []
     legacy = ctx.get("legacy") if isinstance(ctx.get("legacy"), dict) else {}
     decision = ctx.get("decision") if isinstance(ctx.get("decision"), dict) else {}
     entity_docs = ctx.get("entity_docs") if isinstance(ctx.get("entity_docs"), list) else []
@@ -1815,6 +1870,7 @@ def _heuristic_fields(ctx: dict[str, Any]) -> dict[str, str]:
         ),
         "hospital_name": _clean_hospital_name(
             _first_non_artifact(
+                claim_tags[2] if len(claim_tags) > 2 else "",
                 _find_values(entity_docs, ["hospital_name", "hospital", "provider_hospital", "treating_hospital", "facility_name"], 1)[0] if _find_values(entity_docs, ["hospital_name", "hospital", "provider_hospital", "treating_hospital", "facility_name"], 1) else "",
                 legacy.get("hospital_name"),
                 default="-",
@@ -1830,7 +1886,7 @@ def _heuristic_fields(ctx: dict[str, Any]) -> dict[str, str]:
         "doa": _first(legacy.get("doa_date"), legacy.get("date_of_admission"), legacy.get("admission_date"), _find_values(entity_docs, ["doa", "doa_date", "date_of_admission", "admission_date"], 1)[0] if _find_values(entity_docs, ["doa", "doa_date", "date_of_admission", "admission_date"], 1) else ""),
         "dod": _first(legacy.get("dod_date"), legacy.get("date_of_discharge"), legacy.get("discharge_date"), _find_values(entity_docs, ["dod", "dod_date", "date_of_discharge", "discharge_date"], 1)[0] if _find_values(entity_docs, ["dod", "dod_date", "date_of_discharge", "discharge_date"], 1) else ""),
         "diagnosis": _first(_find_values(entity_docs, ["diagnosis", "final_diagnosis", "provisional_diagnosis", "primary_diagnosis"], 1)[0] if _find_values(entity_docs, ["diagnosis", "final_diagnosis", "provisional_diagnosis", "primary_diagnosis"], 1) else "", legacy.get("diagnosis"), "-"),
-        "complaints": _first(_find_values(entity_docs, ["chief_complaints", "chief_complaint", "presenting_complaints", "complaints"], 1)[0] if _find_values(entity_docs, ["chief_complaints", "chief_complaint", "presenting_complaints", "complaints"], 1) else "", legacy.get("complaints"), "-"),
+        "complaints": _first(_find_values(entity_docs, ["chief_complaints_at_admission", "chief_complaints", "chief_complaint", "presenting_complaints", "complaints"], 1)[0] if _find_values(entity_docs, ["chief_complaints_at_admission", "chief_complaints", "chief_complaint", "presenting_complaints", "complaints"], 1) else "", legacy.get("complaints"), "-"),
         "findings": findings_text,
         "investigation_finding_in_details": "\n".join(investigations[:120]) if investigations else "No investigation reports available.",
         "medicine_used": medicines,
@@ -1875,6 +1931,62 @@ def _merge_llm_with_heuristic_fields(llm_fields: dict[str, str], heuristic_field
     out["high_end_antibiotic_for_rejection"] = _high_end_antibiotic(
         "\n".join([out.get("medicine_used", ""), out.get("investigation_finding_in_details", "")])
     )
+    return out
+
+
+def _clean_investigation_report_rows(value: Any) -> str:
+    text_value = _txt(value)
+    if not text_value or text_value == "-":
+        return "No investigation reports available."
+
+    kept: list[str] = []
+    for raw_line in re.split(r"[\r\n]+", text_value):
+        line = _normalize_space_text(raw_line).strip(" -")
+        if not line:
+            continue
+        if re.search(r"\bno\s+investigation\s+reports?\s+available\b", line, flags=re.I):
+            continue
+
+        value_match = re.search(r"\bvalue\s*:\s*([^|]+)", line, flags=re.I)
+        range_match = re.search(r"\breference[_\s-]*range\s*:\s*([^|]+)", line, flags=re.I)
+        value_text = _normalize_space_text(value_match.group(1) if value_match else "")
+        range_text = _normalize_space_text(range_match.group(1) if range_match else "")
+
+        has_empty_value = bool(value_match) and value_text in {"", "-", "na", "n/a", "nil", "none"}
+        has_empty_range = bool(range_match) and range_text in {"", "-", "na", "n/a", "nil", "none"}
+        if value_match and range_match and has_empty_value and has_empty_range:
+            continue
+        has_value_result = bool(value_match) and not has_empty_value
+        has_range_result = bool(range_match) and not has_empty_range
+        has_word_result = bool(
+            re.search(
+                r"\b(?:positive|negative|reactive|non[-\s]*reactive|detected|not\s+detected|normal|abnormal|high|low|elevated|decreased|impression|finding|opacity|edema|haemorrhage|hemorrhage|acuity)\b",
+                line,
+                flags=re.I,
+            )
+        )
+        has_only_date_without_result = bool(re.search(r"\bdate\s*:", line, flags=re.I)) and not (has_value_result or has_range_result or has_word_result)
+        if has_only_date_without_result:
+            continue
+
+        line = re.sub(r"\blab_name\s*:\s*-\s*\|\s*", "", line, flags=re.I)
+        line = re.sub(r"\blab\s*name\s*:\s*-\s*\|\s*", "", line, flags=re.I)
+        line = re.sub(r"\blab\s*:\s*-\s*\|\s*", "", line, flags=re.I)
+        line = re.sub(r"\btest\s*:\s*", "", line, flags=re.I)
+        line = re.sub(r"\bvalue\s*:\s*", "Value: ", line, flags=re.I)
+        line = re.sub(r"\breference[_\s-]*range\s*:\s*", "Range: ", line, flags=re.I)
+        kept.append(line)
+
+    return "\n".join(_dedupe(kept)) if kept else "No investigation reports available."
+
+
+def _postprocess_structured_fields(fields: dict[str, str]) -> dict[str, str]:
+    out = dict(fields or {})
+    out["investigation_finding_in_details"] = _clean_investigation_report_rows(out.get("investigation_finding_in_details"))
+    if re.search(r"\bno\s+investigation\s+reports?\s+available\b", out["investigation_finding_in_details"], flags=re.I):
+        deranged = _txt(out.get("deranged_investigation"))
+        if deranged == "-" or re.search(r"\b(?:normal|abnormal|high|low|deranged|elevated|decreased)\b", deranged, flags=re.I) is None:
+            out["deranged_investigation"] = "No deranged investigation values found."
     return out
 
 
@@ -2275,6 +2387,8 @@ def _llm_fields(ctx: dict[str, Any]) -> tuple[dict[str, str], float | None]:
         "Capture treating_doctor and treating_doctor_registration_number whenever present.\n"
         "For investigation_finding_in_details include lab name, test, value, and reference range when available.\n"
         "Segregation: complaints must go only in complaints; objective admission/stay observations must go only in findings.\n"
+        "Ignore insurance-history/claim-form checkbox text such as 'Previously covered by any other Mediclaim', 'Self inflicted road traffic accident', or 'Substance abuse/alcohol consumption' unless supported by the actual admission/discharge clinical record.\n"
+        "For maternity claims, preserve pregnancy/labour/LSCS/caesarean/delivery diagnosis, complaints, fetal findings, vitals, and procedure details.\n"
         "Map dates strictly: admission->doa, discharge->dod.\n"
         "Conclusion fields: conclusion and recommendation must be concise and decision-ready.\n"
         "Exact keys required: " + ", ".join(FIELD_KEYS) + "\n\n"
@@ -2570,7 +2684,7 @@ def get_claim_structured_data(db: Session, claim_id: UUID) -> dict[str, Any]:
     return _to_response(dict(row))
 
 
-def generate_claim_structured_data(db: Session, claim_id: UUID, actor_id: str, use_llm: bool = True, force_refresh: bool = True) -> dict[str, Any]:
+def generate_claim_structured_data(db: Session, claim_id: UUID, actor_id: str, use_llm: bool = True, force_refresh: bool = True, require_llm: bool = False) -> dict[str, Any]:
     _ensure_table(db)
     if not force_refresh:
         try:
@@ -2598,14 +2712,19 @@ def generate_claim_structured_data(db: Session, claim_id: UUID, actor_id: str, u
     if use_llm:
         try:
             llm_fields, confidence = _llm_fields(ctx)
-            fields = _merge_llm_with_heuristic_fields(llm_fields, heuristic_fields)
-            source = "llm+heuristic"
+            fields = dict(llm_fields)
+            fields["claim_amount"] = heuristic_fields.get("claim_amount") or fields.get("claim_amount") or "-"
+            source = "verifai_structured"
         except Exception as exc:
             llm_error = str(exc)
+            if require_llm:
+                raise ClaimStructuringError(f"VerifAI structured extraction failed: {llm_error}") from exc
             fields = heuristic_fields
             source = "heuristic_fallback"
     else:
         fields = heuristic_fields
+
+    fields = _postprocess_structured_fields(fields)
 
     fraud_check: dict[str, Any] = {"suspicious": False, "matched_claims": [], "notes": []}
     if not STRICT_RULE_BASED_MODE:

@@ -2,7 +2,7 @@ import asyncio
 import mimetypes
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile, status
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, UploadFile, status
 from sqlalchemy.orm import Session
 
 from app.api.deps.auth import require_roles
@@ -122,17 +122,30 @@ async def upload_document_endpoint(
 )
 async def upload_merged_document_endpoint(
     claim_id: UUID,
-    files: list[UploadFile] = File(...),
+    request: Request,
+    files: list[UploadFile] | None = File(default=None),
     uploaded_by: str | None = Form(default=None),
     retention_class: str = Form(default="standard"),
     compression_mode: str = Form(default="lossy"),
     current_user: AuthenticatedUser = Depends(require_roles(UserRole.super_admin, UserRole.user)),
 ) -> DocumentMergeUploadResponse:
-    if not files:
+    upload_files = list(files or [])
+    if not upload_files:
+        form = await request.form()
+        for field_name in ("files", "files[]", "file", "documents", "documents[]"):
+            for value in form.getlist(field_name):
+                if hasattr(value, "filename") and hasattr(value, "read"):
+                    upload_files.append(value)
+        if not upload_files:
+            for value in form.values():
+                if hasattr(value, "filename") and hasattr(value, "read"):
+                    upload_files.append(value)
+
+    if not upload_files:
         raise HTTPException(status_code=400, detail="no files received")
 
     file_items: list[dict] = []
-    for file in files:
+    for file in upload_files:
         content = await file.read()
         if not content:
             continue
@@ -266,7 +279,6 @@ def get_document_download_url_endpoint(
         raise HTTPException(status_code=500, detail=f"storage config error: {exc}") from exc
     except StorageOperationError as exc:
         raise HTTPException(status_code=502, detail=f"storage operation error: {exc}") from exc
-
 
 
 

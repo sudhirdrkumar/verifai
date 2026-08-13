@@ -1718,7 +1718,7 @@ def _extract_openai(
     }
 
     # Force single model for extraction to avoid fallback bursts and keep consistency.
-    configured_model = "gpt-4.1-mini"
+    configured_model = "gpt-4o-mini"
     model_candidates: list[str] = [configured_model]
 
     model_name = configured_model

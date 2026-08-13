@@ -1747,6 +1747,7 @@ def generate_claim_structured_data_endpoint(
             actor_id=actor_id,
             use_llm=bool(payload.use_llm),
             force_refresh=bool(payload.force_refresh),
+            require_llm=bool(payload.require_llm),
         )
         return ClaimStructuredDataResponse.model_validate(data)
     except ClaimStructuringError as exc:

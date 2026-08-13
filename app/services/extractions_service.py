@@ -576,17 +576,19 @@ def run_s3_openai_pipeline(
     """
     Phase 2 — No DB: Extract from S3.
     Hybrid approach:
-    - IMAGES: Use S3-direct extraction (presigned URL, no EC2 download)
-    - PDFs: Use local extraction (works reliably with OpenAI)
+    - OpenAI/auto: Try S3-direct extraction first for PDFs/images.
+    - Fallback: Local extraction if S3-direct cannot process the document.
     """
     from app.services.extraction_s3_direct import extract_via_s3_presigned_url, S3DirectExtractionError
 
     safe_mime = str(mime_type or "application/pdf").strip().lower()
     is_image = safe_mime.startswith("image/")
+    is_pdf = safe_mime == "application/pdf" or str(file_name or "").lower().endswith(".pdf")
 
-    # Use S3-direct only for IMAGES to avoid EC2 memory overhead
-    if is_image and provider in (ExtractionProvider.openai, ExtractionProvider.auto):
-        logger.info(f"Using S3-direct extraction for image {file_name} with provider={provider.value}")
+    logger.info(f"HYBRID_EXTRACTION_DEBUG: file_name={file_name}, raw_mime_type={mime_type}, safe_mime={safe_mime}, is_image={is_image}, provider={provider.value}")
+
+    if (is_image or is_pdf) and provider in (ExtractionProvider.openai, ExtractionProvider.auto):
+        logger.info(f"Using S3-direct extraction for {file_name} with provider={provider.value}")
         try:
             return extract_via_s3_presigned_url(
                 s3_bucket=s3_bucket or settings.s3_bucket,

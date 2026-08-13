@@ -91,6 +91,7 @@ class ClaimReportGrammarCheckResponse(BaseModel):
 class ClaimStructuredDataRequest(BaseModel):
     use_llm: bool = True
     force_refresh: bool = True
+    require_llm: bool = False
     actor_id: str | None = Field(default=None, max_length=100)
 
 

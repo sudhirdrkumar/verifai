@@ -3,19 +3,31 @@ PHASE 5: ML-Powered Conclusion Generation using OpenAI GPT-4 Omni
 """
 
 import logging
-from fastapi import APIRouter, HTTPException, status, Body
+from fastapi import APIRouter, Depends, HTTPException, status, Body
+
+from app.api.deps.auth import require_roles
+from app.schemas.auth import UserRole
+from app.services.auth_service import AuthenticatedUser
 from app.services.phase5_ml_openai import Phase5MLGenerator
-from app.services.grammar_service import grammar_check_report_html, GrammarCheckError
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/phase5", tags=["phase5-ml"])
 
-# Initialize OpenAI ML generator
-ml_generator = Phase5MLGenerator()
+_ml_generator: Phase5MLGenerator | None = None
+
+
+def get_ml_generator() -> Phase5MLGenerator:
+    global _ml_generator
+    if _ml_generator is None:
+        _ml_generator = Phase5MLGenerator()
+    return _ml_generator
 
 
 @router.post("/generate-conclusion")
-async def generate_conclusion(claim_data: dict = Body(...)):
+async def generate_conclusion(
+    claim_data: dict = Body(...),
+    _current_user: AuthenticatedUser = Depends(require_roles(UserRole.super_admin, UserRole.user, UserRole.doctor, UserRole.auditor)),
+):
     """
     Generate medical conclusion using OpenAI GPT-4 Omni.
 
@@ -38,6 +50,7 @@ async def generate_conclusion(claim_data: dict = Body(...)):
 
         logger.info(f"Generating conclusion for claim: {claim_data.get('claim_id')}")
         # Generate conclusion using OpenAI
+        ml_generator = get_ml_generator()
         result = ml_generator.generate_conclusion(claim_data)
         logger.info(f"Successfully generated conclusion, tokens: {result.get('tokens_used')}")
 
