@@ -151,31 +151,18 @@ def _call_openai_with_s3_url(
             "image_url": {"url": s3_url}
         })
     else:
-        # For PDFs, download from S3 and send as base64
-        import base64
-        try:
-            response = httpx.get(s3_url, timeout=60)
-            response.raise_for_status()
-            pdf_data = response.content
-            pdf_base64 = base64.standard_b64encode(pdf_data).decode('utf-8')
-
-            user_content.append({
-                "type": "document",
-                "document": {
-                    "type": "application/pdf",
-                    "source": {
-                        "type": "base64",
-                        "media_type": "application/pdf",
-                        "data": pdf_base64
-                    }
+        # For PDFs, send as URL to OpenAI directly
+        logger.info(f"S3DIRECT_PDF: sending PDF {safe_name} via URL to OpenAI")
+        user_content.append({
+            "type": "document",
+            "document": {
+                "type": "application/pdf",
+                "source": {
+                    "type": "url",
+                    "url": s3_url
                 }
-            })
-        except Exception as e:
-            logger.warning(f"Failed to download PDF from S3 URL for base64 encoding: {e}. Using URL text fallback.")
-            user_content.append({
-                "type": "text",
-                "text": f"Document URL: {s3_url}\n\nPlease extract from the document at this URL."
-            })
+            }
+        })
 
     base_url = (
         settings.openai_base_url.rstrip("/")
@@ -211,12 +198,17 @@ def _call_openai_with_s3_url(
 
         result = response.json()
         model_output = result.get("choices", [{}])[0].get("message", {}).get("content", "")
+        extracted = _parse_json_entities(model_output)
+
+        logger.info(f"S3DIRECT_OPENAI_RESPONSE: document={safe_name}, model_output_length={len(model_output)}, extracted_keys={list(extracted.keys()) if extracted else 'EMPTY'}")
+        if not extracted or not any(extracted.values()):
+            logger.warning(f"S3DIRECT_EMPTY_EXTRACTION: document={safe_name}, raw_response={model_output[:500]}")
 
         return {
             "provider": "openai-s3-direct",
             "model_name": "gpt-4o-mini",
             "extraction_version": "openai-v2-s3-direct",
-            "extracted_entities": _parse_json_entities(model_output),
+            "extracted_entities": extracted,
             "evidence_refs": [],
             "confidence": 0.85,  # Direct S3 extraction has good confidence
             "raw_response": {
