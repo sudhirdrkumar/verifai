@@ -128,13 +128,15 @@ def extract_via_s3_presigned_url(
 
     if is_pdf:
         try:
-            logger.info(f"Downloading PDF to check size: {document_name}")
+            logger.info(f"PDF_PREPROCESS: Downloading PDF to check size: {document_name}")
             response = httpx.get(presigned_url, timeout=60)
             response.raise_for_status()
             pdf_bytes = response.content
+            logger.info(f"PDF_PREPROCESS: Downloaded {len(pdf_bytes)} bytes for {document_name}")
 
             # Check if PDF needs splitting
             chunks = _split_large_pdf(pdf_bytes, max_pages=90)
+            logger.info(f"PDF_PREPROCESS: Split result: {len(chunks)} chunks for {document_name}")
             if len(chunks) > 1:
                 logger.info(f"Extracting {len(chunks)} PDF chunks from {document_name}")
                 combined_result = {

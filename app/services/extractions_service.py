@@ -602,11 +602,18 @@ def run_s3_openai_pipeline(
             has_investigations = bool(entities.get("all_investigation_reports_with_values") or entities.get("deranged_investigation_reports"))
             has_tpr = bool(entities.get("daily_tpr_chart_min_max"))
             has_medicines = bool(entities.get("medicine_used"))
+            has_diagnosis = bool(entities.get("diagnosis"))
+            has_clinical = bool(entities.get("clinical_findings"))
 
-            # If critical fields are missing, this might be an image PDF needing OCR
-            if not has_investigations and not has_tpr and not has_medicines:
-                logger.warning(f"S3-direct extraction missing critical fields for {file_name}. Trying local extraction.")
-                # Fall through to local extraction for better OCR handling
+            logger.info(f"S3_EXTRACTION_CHECK: {file_name}, has_diagnosis={has_diagnosis}, has_investigations={has_investigations}, has_tpr={has_tpr}, has_medicines={has_medicines}, has_clinical={has_clinical}")
+
+            # If critical fields are empty, this is likely a scanned/image PDF needing OCR
+            if not (has_investigations or has_tpr or has_medicines or has_clinical):
+                logger.warning(f"S3-direct extraction returned NO clinical data for {file_name}. Falling back to local extraction with OCR.")
+                # Fall through to local extraction for OCR handling
+            elif not (has_investigations and has_tpr and has_medicines):
+                logger.warning(f"S3-direct extraction incomplete for {file_name} (missing some fields). Trying local extraction.")
+                # Fall through to local extraction for better results
             else:
                 return result
 
