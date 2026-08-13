@@ -1,0 +1,17 @@
+{
+  "name": "Verifai QC-BKP",
+  "build": {
+    "dockerfile": "Dockerfile",
+    "context": ".."
+  },
+  "user": "ubuntu",
+  "install": "bash scripts/cloud-agent-install.sh",
+  "start": "bash scripts/cloud-agent-start.sh",
+  "terminals": [
+    {
+      "name": "api",
+      "command": "uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload"
+    }
+  ],
+  "ports": [8000]
+}
