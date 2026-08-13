@@ -638,6 +638,18 @@ def run_s3_openai_pipeline(
     logger.info(f"🔄 FALLING BACK from S3-direct for {file_name}")
     file_bytes = download_bytes(storage_key)
 
+    # Check if PDF needs splitting (too large for OpenAI)
+    from app.services.extraction_s3_direct import _split_large_pdf
+    safe_mime = str(mime_type or "application/pdf").strip().lower()
+    is_pdf = safe_mime == "application/pdf" or str(file_name or "").lower().endswith(".pdf")
+
+    if is_pdf and len(file_bytes) > 5_000_000:  # >5MB, likely large PDF
+        logger.info(f"🔄 PDF is large ({len(file_bytes)} bytes), attempting to split for extraction")
+        chunks = _split_large_pdf(file_bytes, max_pages=90)
+        if len(chunks) > 1:
+            logger.info(f"🔄 Split into {len(chunks)} chunks, extracting first chunk with OpenAI")
+            file_bytes = chunks[0]  # Process first chunk first
+
     # Try 1: OpenAI with local file (better at understanding context, filtering noise)
     logger.info(f"🔄 TRY 1: OpenAI with local file for {file_name}")
     try:
