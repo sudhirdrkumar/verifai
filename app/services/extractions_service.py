@@ -577,7 +577,8 @@ def run_s3_openai_pipeline(
     Phase 2 — No DB: Extract from S3.
     Hybrid approach:
     - OpenAI/auto: Try S3-direct extraction first for PDFs/images.
-    - Fallback: Local extraction if S3-direct cannot process the document.
+    - Fallback: AWS Textract for better structured data extraction.
+    - Last resort: Local extraction if Textract fails.
     """
     from app.services.extraction_s3_direct import extract_via_s3_presigned_url, S3DirectExtractionError
 
@@ -585,7 +586,7 @@ def run_s3_openai_pipeline(
     is_image = safe_mime.startswith("image/")
     is_pdf = safe_mime == "application/pdf" or str(file_name or "").lower().endswith(".pdf")
 
-    logger.info(f"HYBRID_EXTRACTION_DEBUG: file_name={file_name}, raw_mime_type={mime_type}, safe_mime={safe_mime}, is_image={is_image}, provider={provider.value}")
+    logger.info(f"HYBRID_EXTRACTION_START: file_name={file_name}, raw_mime_type={mime_type}, safe_mime={safe_mime}, is_image={is_image}, provider={provider.value}")
 
     if (is_image or is_pdf) and provider in (ExtractionProvider.openai, ExtractionProvider.auto):
         logger.info(f"Using S3-direct extraction for {file_name} with provider={provider.value}")
@@ -605,10 +606,19 @@ def run_s3_openai_pipeline(
             has_diagnosis = bool(entities.get("diagnosis"))
             has_clinical = bool(entities.get("clinical_findings"))
 
-            logger.info(f"S3_EXTRACTION_CHECK: {file_name}, has_diagnosis={has_diagnosis}, has_investigations={has_investigations}, has_tpr={has_tpr}, has_medicines={has_medicines}, has_clinical={has_clinical}")
+            # Check for corrupted/garbled text in medicine field
+            medicine_str = str(entities.get("medicine_used", ""))
+            medicine_corrupted = has_medicines and (
+                len(medicine_str) > 500 or
+                "mojalla" in medicine_str.lower() or
+                "dharuwa" in medicine_str.lower() or
+                "hazipur" in medicine_str.lower() or
+                "enclave" in medicine_str.lower()
+            )
+
+            logger.info(f"S3_EXTRACTION_CHECK: {file_name}, has_diagnosis={has_diagnosis}, has_investigations={has_investigations}, has_tpr={has_tpr}, has_medicines={has_medicines}, medicine_corrupted={medicine_corrupted}, has_clinical={has_clinical}")
 
             # If critical fields are empty or corrupted, use AWS Textract for better structured extraction
-            medicine_corrupted = has_medicines and len(str(entities.get("medicine_used", ""))) > 500
             if not (has_investigations or has_tpr or has_medicines or has_clinical) or medicine_corrupted:
                 logger.warning(f"S3-direct extraction returned incomplete/corrupted data for {file_name}. Falling back to AWS Textract.")
                 # Fall through to AWS Textract for better structured extraction
@@ -643,7 +653,7 @@ def run_s3_openai_pipeline(
 
     # Last resort: Local extraction
     logger.info(f"Using local extraction (last resort) for {file_name}")
-    return run_extraction(
+    result = run_extraction(
         provider=provider,
         document_name=file_name,
         mime_type=mime_type,
@@ -651,6 +661,11 @@ def run_s3_openai_pipeline(
         storage_key=storage_key or None,
         s3_bucket=s3_bucket,
     )
+
+    # Log final extraction result
+    entities = result.get("extracted_entities", {})
+    logger.info(f"HYBRID_EXTRACTION_FINAL: file_name={file_name}, method={result.get('provider', 'unknown')}, has_investigations={bool(entities.get('all_investigation_reports_with_values'))}, has_tpr={bool(entities.get('daily_tpr_chart_min_max'))}, has_medicines={bool(entities.get('medicine_used'))}")
+    return result
 
 
 def _pipeline_save_result(
