@@ -1860,7 +1860,8 @@ def _heuristic_fields(ctx: dict[str, Any]) -> dict[str, str]:
         ),
         "claim_type": _first(_find_values(entity_docs, ["claim_type", "case_type"], 1)[0] if _find_values(entity_docs, ["claim_type", "case_type"], 1) else "", legacy.get("claim_type"), "-"),
         "insured_name": _first_non_artifact(
-            # Prioritize legacy primary beneficiary fields
+            # Prioritize legacy beneficiary fields
+            legacy.get("BenefName"),
             legacy.get("primary_beneficiary_name"),
             legacy.get("benef_name"),
             legacy.get("benefname"),
