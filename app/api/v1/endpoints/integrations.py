@@ -417,7 +417,7 @@ def _build_verifai_claim_details(claim_row: dict[str, Any], legacy_payload: dict
         "member_id": _clean_text(claim_row.get("patient_identifier")) or _legacy_first_value(legacy_payload, "member_id"),
         "insured_name": _legacy_first_value(legacy_payload, "insured_name", "benefname", "pri_benef_name") or patient_name,
         "patient_name": patient_name,
-        "hospital_name": _legacy_first_value(legacy_payload, "hospital_name"),
+        "hospital_name": _legacy_first_value(legacy_payload, "hospital_name", "hospital", "treating_hospital", "provider_hospital", "facility_name", "hospital_name_text"),
         "hospital_city": _legacy_first_value(legacy_payload, "hospital_city"),
         "admission_date": _parse_date_value(legacy_payload.get("doa_date")),
         "discharge_date": _parse_date_value(legacy_payload.get("dod_date")),
