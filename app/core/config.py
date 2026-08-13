@@ -49,6 +49,10 @@ class Settings(BaseSettings):
         default="gpt-4o-mini",
         validation_alias=AliasChoices("OPENAI_MODEL"),
     )
+    openai_vision_model: str = Field(
+        default="gpt-4o-mini",
+        validation_alias=AliasChoices("OPENAI_VISION_MODEL"),
+    )
     openai_base_url: str | None = Field(
         default=None,
         validation_alias=AliasChoices("OPENAI_BASE_URL"),
