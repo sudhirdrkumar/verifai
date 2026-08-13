@@ -1860,11 +1860,14 @@ def _heuristic_fields(ctx: dict[str, Any]) -> dict[str, str]:
         ),
         "claim_type": _first(_find_values(entity_docs, ["claim_type", "case_type"], 1)[0] if _find_values(entity_docs, ["claim_type", "case_type"], 1) else "", legacy.get("claim_type"), "-"),
         "insured_name": _first_non_artifact(
-            _find_values(entity_docs, ["insured_name", "name", "patient_name", "insured", "beneficiary", "policy_holder_name"], 1)[0] if _find_values(entity_docs, ["insured_name", "name", "patient_name", "insured", "beneficiary", "policy_holder_name"], 1) else "",
+            # Prioritize legacy primary beneficiary fields
+            legacy.get("primary_beneficiary_name"),
             legacy.get("benef_name"),
             legacy.get("benefname"),
             legacy.get("beneficiary_name"),
             legacy.get("insured_name"),
+            # Fallback to extraction
+            _find_values(entity_docs, ["insured_name", "name", "patient_name", "insured", "beneficiary", "policy_holder_name"], 1)[0] if _find_values(entity_docs, ["insured_name", "name", "patient_name", "insured", "beneficiary", "policy_holder_name"], 1) else "",
             claim.get("patient_name"),
             default="-",
         ),
@@ -1876,7 +1879,7 @@ def _heuristic_fields(ctx: dict[str, Any]) -> dict[str, str]:
                 default="-",
             )
         ) or "-",
-        "treating_doctor": _first_non_artifact(doctor_from_blob, doctor_from_entities, legacy.get("treating_doctor"), default="-"),
+        "treating_doctor": _first_non_artifact(doctor_from_entities, doctor_from_blob, legacy.get("treating_doctor"), default="-"),  # Prioritize extraction over blob
         "treating_doctor_registration_number": _first_non_artifact(
             registration_from_blob_clean,
             registration_from_entities_clean,
