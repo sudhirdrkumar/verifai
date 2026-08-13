@@ -607,24 +607,42 @@ def run_s3_openai_pipeline(
 
             logger.info(f"S3_EXTRACTION_CHECK: {file_name}, has_diagnosis={has_diagnosis}, has_investigations={has_investigations}, has_tpr={has_tpr}, has_medicines={has_medicines}, has_clinical={has_clinical}")
 
-            # If critical fields are empty, this is likely a scanned/image PDF needing OCR
-            if not (has_investigations or has_tpr or has_medicines or has_clinical):
-                logger.warning(f"S3-direct extraction returned NO clinical data for {file_name}. Falling back to local extraction with OCR.")
-                # Fall through to local extraction for OCR handling
+            # If critical fields are empty or corrupted, use AWS Textract for better structured extraction
+            medicine_corrupted = has_medicines and len(str(entities.get("medicine_used", ""))) > 500
+            if not (has_investigations or has_tpr or has_medicines or has_clinical) or medicine_corrupted:
+                logger.warning(f"S3-direct extraction returned incomplete/corrupted data for {file_name}. Falling back to AWS Textract.")
+                # Fall through to AWS Textract for better structured extraction
             elif not (has_investigations and has_tpr and has_medicines):
-                logger.warning(f"S3-direct extraction incomplete for {file_name} (missing some fields). Trying local extraction.")
-                # Fall through to local extraction for better results
+                logger.warning(f"S3-direct extraction incomplete for {file_name} (missing some fields). Trying AWS Textract.")
+                # Fall through to AWS Textract for better results
             else:
                 return result
 
         except S3DirectExtractionError as e:
-            logger.warning(f"S3-direct extraction failed: {e}. Falling back to local extraction for {file_name}")
-            # Fall through to local extraction only if S3-direct fails
+            logger.warning(f"S3-direct extraction failed: {e}. Falling back to AWS Textract for {file_name}")
+            # Fall through to AWS Textract
 
-    # Local extraction for PDFs and non-OpenAI providers
-    # (PDFs extract reliably with local processing)
-    logger.info(f"Using local extraction for {file_name} with provider={provider.value} (mime_type={safe_mime})")
+    # Fallback extraction: Try AWS Textract first, then local
+    logger.info(f"S3-direct/OpenAI failed for {file_name}. Trying AWS Textract (best for large PDFs)")
     file_bytes = download_bytes(storage_key)
+
+    try:
+        # Try AWS Textract for better structured data extraction
+        textract_result = run_extraction(
+            provider=ExtractionProvider.aws_textract,
+            document_name=file_name,
+            mime_type=mime_type,
+            payload=file_bytes,
+            storage_key=storage_key or None,
+            s3_bucket=s3_bucket,
+        )
+        logger.info(f"AWS Textract extraction succeeded for {file_name}")
+        return textract_result
+    except Exception as textract_err:
+        logger.warning(f"AWS Textract failed for {file_name}: {textract_err}. Falling back to local extraction.")
+
+    # Last resort: Local extraction
+    logger.info(f"Using local extraction (last resort) for {file_name}")
     return run_extraction(
         provider=provider,
         document_name=file_name,
