@@ -4,6 +4,7 @@ import redis
 import psycopg
 import logging
 from datetime import datetime
+import google.generativeai as genai
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -11,55 +12,65 @@ logger = logging.getLogger(__name__)
 DB_DSN = os.getenv('DATABASE_URL', 'postgresql://postgres:Dhoom*2690@127.0.0.1:5432/qc_bkp_modern')
 REDIS_HOST = os.getenv('REDIS_HOST', '127.0.0.1')
 REDIS_PORT = int(os.getenv('REDIS_PORT', 6379))
+GEMINI_API_KEY = os.getenv('GEMINI_API_KEY')
 
+if not GEMINI_API_KEY:
+    raise ValueError('GEMINI_API_KEY environment variable not set')
+
+genai.configure(api_key=GEMINI_API_KEY)
 r = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, decode_responses=True, socket_keepalive=True)
 
+def extract_structured_data_gemini(ocr_text: str, claim_id: str) -> dict:
+    """Extract structured medical data from OCR text using Gemini"""
+    try:
+        prompt = f'''Extract medical claim data from the OCR text and return ONLY valid JSON (no markdown, no extra text):
+{{
+  "company_name": "insurance company name",
+  "hospital_name": "hospital name",
+  "treating_doctor": "doctor name or '-' if not found",
+  "treating_doctor_registration_number": "registration number or '-'",
+  "doa": "date of admission (DD-MM-YYYY)",
+  "dod": "date of discharge (DD-MM-YYYY)",
+  "diagnosis": "main diagnosis or chief complaint",
+  "complaints": "patient complaints/symptoms",
+  "findings": "clinical findings",
+  "medicine_used": "list of medicines used, comma-separated",
+  "high_end_antibiotic_for_rejection": "any high-end antibiotics if mentioned",
+  "deranged_investigation": "any deranged investigation values",
+  "investigation_finding_in_details": "detailed investigation findings",
+  "claim_amount": "claimed amount or total bill amount",
+  "conclusion": "conclusion or recommendation",
+  "recommendation": "final recommendation (APPROVE/REJECT/QUERY)"
+}}
 
-def generate_text_report(structured_data: dict) -> str:
-    """Generate plain text medical report."""
-    hospital = structured_data.get('hospital_name', 'Not Specified')
-    doctor = structured_data.get('treating_doctor', 'Not Specified')
-    diagnosis = structured_data.get('diagnosis', 'Not Specified')
-    complaints = structured_data.get('complaints', 'Not Specified')
-    medicine = structured_data.get('medicine_used', 'Not Specified')
-    claim_amount = structured_data.get('claim_amount', 'Not Specified')
-    conclusion = structured_data.get('conclusion', 'Not Specified')
+OCR TEXT:
+{ocr_text}
 
-    text_report = f"""
-{'='*70}
-MEDICAL CLAIM REPORT - AUTO GENERATED
-{'='*70}
-Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
-Report Type: AI-Generated (Gemini 3.5 Flash)
-{'='*70}
+Return ONLY the JSON object, nothing else.'''
 
-FACILITY & PROVIDER INFORMATION
-{'-'*70}
-Hospital:          {hospital}
-Treating Doctor:   {doctor}
+        model = genai.GenerativeModel('gemini-1.5-flash')
+        response = model.generate_content(prompt)
 
-CLINICAL DETAILS
-{'-'*70}
-Diagnosis:         {diagnosis}
-Complaints:        {complaints}
-Medications:       {medicine}
+        response_text = response.text.strip()
 
-CLAIM DETAILS
-{'-'*70}
-Claim Amount:      ₹{claim_amount}
+        # Clean up markdown code blocks if present
+        if response_text.startswith('```'):
+            response_text = response_text.split('```')[1]
+            if response_text.startswith('json'):
+                response_text = response_text[4:]
+            response_text = response_text.strip()
 
-AI CONCLUSION
-{'-'*70}
-{conclusion}
+        structured_data = json.loads(response_text)
+        logger.info(f'✅ Gemini structured extraction for claim {claim_id} successful')
+        return structured_data
 
-{'='*70}
-Note: This report was auto-generated using AI analysis of OCR-extracted
-medical documents. Doctor review is required before final approval.
-{'='*70}
-    """.strip()
-
-    return text_report
-
+    except json.JSONDecodeError as e:
+        logger.error(f'Failed to parse Gemini JSON response: {e}')
+        logger.error(f'Response was: {response_text[:200]}')
+        return {}
+    except Exception as e:
+        logger.error(f'Gemini extraction failed: {e}', exc_info=True)
+        return {}
 
 def auto_generate_report(cur, claim_id: str, structured_json: dict):
     """Auto-generate medical report for claim."""
@@ -74,7 +85,38 @@ def auto_generate_report(cur, claim_id: str, structured_json: dict):
             'conclusion': structured_json.get('conclusion', 'Not Specified'),
         }
 
-        report_text = generate_text_report(structured_data)
+        text_report = f"""
+{'='*70}
+MEDICAL CLAIM REPORT - AUTO GENERATED
+{'='*70}
+Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+Report Type: AI-Generated (Gemini 1.5 Flash)
+{'='*70}
+
+FACILITY & PROVIDER INFORMATION
+{'-'*70}
+Hospital:          {structured_data['hospital_name']}
+Treating Doctor:   {structured_data['treating_doctor']}
+
+CLINICAL DETAILS
+{'-'*70}
+Diagnosis:         {structured_data['diagnosis']}
+Complaints:        {structured_data['complaints']}
+Medications:       {structured_data['medicine_used']}
+
+CLAIM DETAILS
+{'-'*70}
+Claim Amount:      ₹{structured_data['claim_amount']}
+
+CONCLUSION
+{'-'*70}
+{structured_data['conclusion']}
+
+{'='*70}
+Note: This report was auto-generated using AI analysis of OCR-extracted
+medical documents. Doctor review is required before final approval.
+{'='*70}
+        """.strip()
 
         # Insert report into database
         cur.execute('''
@@ -97,7 +139,7 @@ def auto_generate_report(cur, claim_id: str, structured_json: dict):
             structured_data['medicine_used'],
             structured_data['claim_amount'],
             structured_data['conclusion'],
-            report_text,
+            text_report,
             'generated'
         ))
 
@@ -108,9 +150,8 @@ def auto_generate_report(cur, claim_id: str, structured_json: dict):
         logger.error(f'Error auto-generating report: {str(e)}', exc_info=True)
         return False
 
-
 def run_stage2_loop():
-    logger.info('Stage 2: Auto-Report Trigger (no LLM processing)')
+    logger.info('Stage 2 Structuring Worker Active (Gemini 1.5 Flash)')
 
     while True:
         try:
@@ -121,51 +162,108 @@ def run_stage2_loop():
             task = json.loads(raw_task[1])
             claim_id = task['claim_id']
 
-            logger.info(f'Processing Claim {claim_id}: Triggering Stage 3 auto-report')
+            logger.info(f'Processing Claim {claim_id}: Extracting structured data with Gemini')
 
             try:
                 conn = psycopg.connect(DB_DSN)
                 cur = conn.cursor()
 
-                # Check if structured data exists for this claim
-                cur.execute('SELECT id FROM claim_structured_data WHERE claim_id = %s LIMIT 1', (claim_id,))
-                structured_row = cur.fetchone()
+                # Get OCR text from Stage 1
+                cur.execute('''
+                    SELECT de.raw_response
+                    FROM document_extractions de
+                    JOIN claim_documents cd ON de.document_id = cd.id
+                    WHERE cd.claim_id = %s
+                    ORDER BY de.created_at DESC
+                    LIMIT 1
+                ''', (claim_id,))
 
-                if structured_row:
-                    logger.info(f'Found structured data for claim {claim_id}, generating auto-report')
-                    # Get structured data for report generation
-                    cur.execute('''
-                        SELECT company_name, hospital_name, treating_doctor,
-                               doa, dod, diagnosis, complaints, medicine_used,
-                               claim_amount, conclusion
-                        FROM claim_structured_data
-                        WHERE claim_id = %s
-                        LIMIT 1
-                    ''', (claim_id,))
+                ocr_row = cur.fetchone()
+                if not ocr_row or not ocr_row[0]:
+                    logger.warning(f'No OCR text found for claim {claim_id}')
+                    cur.close()
+                    conn.close()
+                    continue
 
-                    data_row = cur.fetchone()
-                    if data_row:
-                        structured_json = {
-                            'company_name': data_row[0] or '',
-                            'hospital_name': data_row[1] or '',
-                            'treating_doctor': data_row[2] or '',
-                            'doa': data_row[3] or '',
-                            'dod': data_row[4] or '',
-                            'diagnosis': data_row[5] or '',
-                            'complaints': data_row[6] or '',
-                            'medicine_used': data_row[7] or '',
-                            'claim_amount': data_row[8] or '',
-                            'conclusion': data_row[9] or '',
-                        }
-                        # AUTO-GENERATE REPORT - STAGE 3
-                        auto_generate_report(cur, claim_id, structured_json)
-                        conn.commit()
-                        logger.info(f'✅ Claim {claim_id} auto-report generated')
-                else:
-                    logger.warning(f'No structured data found for claim {claim_id}, skipping report generation')
+                ocr_text = ocr_row[0]
+                logger.info(f'Retrieved {len(ocr_text)} chars of OCR text for claim {claim_id}')
+
+                # Extract structured data with Gemini
+                structured_json = extract_structured_data_gemini(ocr_text, claim_id)
+
+                if not structured_json:
+                    logger.warning(f'Failed to extract structured data for claim {claim_id}')
+                    cur.close()
+                    conn.close()
+                    continue
+
+                # Get external claim ID
+                cur.execute('SELECT external_claim_id FROM claims WHERE id = %s', (claim_id,))
+                external_id_row = cur.fetchone()
+                external_id = external_id_row[0] if external_id_row else ''
+
+                # Store structured data in database
+                cur.execute('''
+                    INSERT INTO claim_structured_data (
+                        claim_id, external_claim_id, company_name, hospital_name, treating_doctor,
+                        treating_doctor_registration_number, doa, dod, diagnosis, complaints,
+                        findings, medicine_used, high_end_antibiotic_for_rejection,
+                        deranged_investigation, investigation_finding_in_details,
+                        claim_amount, conclusion, recommendation,
+                        raw_payload, source, created_at, updated_at
+                    )
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW(), NOW())
+                    ON CONFLICT (claim_id) DO UPDATE SET
+                        company_name = EXCLUDED.company_name,
+                        hospital_name = EXCLUDED.hospital_name,
+                        treating_doctor = EXCLUDED.treating_doctor,
+                        treating_doctor_registration_number = EXCLUDED.treating_doctor_registration_number,
+                        doa = EXCLUDED.doa,
+                        dod = EXCLUDED.dod,
+                        diagnosis = EXCLUDED.diagnosis,
+                        complaints = EXCLUDED.complaints,
+                        findings = EXCLUDED.findings,
+                        medicine_used = EXCLUDED.medicine_used,
+                        high_end_antibiotic_for_rejection = EXCLUDED.high_end_antibiotic_for_rejection,
+                        deranged_investigation = EXCLUDED.deranged_investigation,
+                        investigation_finding_in_details = EXCLUDED.investigation_finding_in_details,
+                        claim_amount = EXCLUDED.claim_amount,
+                        conclusion = EXCLUDED.conclusion,
+                        recommendation = EXCLUDED.recommendation,
+                        raw_payload = EXCLUDED.raw_payload,
+                        updated_at = NOW()
+                ''', (
+                    claim_id, external_id,
+                    structured_json.get('company_name', ''),
+                    structured_json.get('hospital_name', ''),
+                    structured_json.get('treating_doctor', ''),
+                    structured_json.get('treating_doctor_registration_number', ''),
+                    structured_json.get('doa', ''),
+                    structured_json.get('dod', ''),
+                    structured_json.get('diagnosis', ''),
+                    structured_json.get('complaints', ''),
+                    structured_json.get('findings', ''),
+                    structured_json.get('medicine_used', ''),
+                    structured_json.get('high_end_antibiotic_for_rejection', ''),
+                    structured_json.get('deranged_investigation', ''),
+                    structured_json.get('investigation_finding_in_details', ''),
+                    structured_json.get('claim_amount', ''),
+                    structured_json.get('conclusion', ''),
+                    structured_json.get('recommendation', ''),
+                    json.dumps(structured_json),
+                    'gemini-1.5-flash'
+                ))
+
+                conn.commit()
+
+                # AUTO-GENERATE REPORT - STAGE 3
+                auto_generate_report(cur, claim_id, structured_json)
+                conn.commit()
 
                 cur.close()
                 conn.close()
+
+                logger.info(f'✅ Claim {claim_id} structured + report generated by Gemini 1.5 Flash')
 
             except Exception as e:
                 logger.error(f'Stage 2 Error on Claim {claim_id}: {str(e)}', exc_info=True)
@@ -174,7 +272,6 @@ def run_stage2_loop():
             continue
         except Exception as e:
             logger.error(f'Worker loop error: {str(e)}', exc_info=True)
-
 
 if __name__ == '__main__':
     run_stage2_loop()
