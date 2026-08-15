@@ -11,6 +11,7 @@ from app.api.v1.endpoints.health import router as health_router
 from app.api.v1.endpoints.integrations import router as integrations_router
 from app.api.v1.endpoints.phase5_ml import router as phase5_ml_router
 from app.api.v1.endpoints.user_tools import router as user_tools_router
+from app.api.v1.endpoints.reports import router as reports_router
 
 api_router = APIRouter()
 api_router.include_router(health_router)
@@ -24,3 +25,4 @@ api_router.include_router(checklist_router)
 api_router.include_router(phase5_ml_router)
 api_router.include_router(folder_sync_router)
 api_router.include_router(user_tools_router)
+api_router.include_router(reports_router)

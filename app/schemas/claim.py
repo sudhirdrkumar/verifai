@@ -139,3 +139,17 @@ class ClaimConclusionGenerateResponse(BaseModel):
     triggered_rules_count: int = 0
     source: str = "rule_engine"
 
+
+class BulkProcessRequest(BaseModel):
+    claim_ids: list[UUID] = Field(min_items=1, max_items=100)
+    force_refresh: bool = False
+
+
+class BulkProcessResponse(BaseModel):
+    total_claims: int
+    queued_claims: int
+    failed_claims: int
+    total_documents_queued: int
+    results: list[dict]
+    message: str
+

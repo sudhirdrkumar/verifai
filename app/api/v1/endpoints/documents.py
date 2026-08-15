@@ -1,9 +1,14 @@
 import asyncio
+import logging
 import mimetypes
+from pathlib import Path
+from uuid import uuid4
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, UploadFile, status
 from sqlalchemy.orm import Session
+
+logger = logging.getLogger(__name__)
 
 from app.api.deps.auth import require_roles
 from app.db.session import SessionLocal, get_db
@@ -14,7 +19,9 @@ from app.schemas.document import (
     DocumentDownloadUrlResponse,
     DocumentListResponse,
     DocumentMergeUploadResponse,
+    DocumentPresignedUploadUrlResponse,
     DocumentParseStatusUpdateRequest,
+    DocumentUploadCompleteRequest,
     DocumentResponse,
 )
 from app.services.access_control import doctor_can_access_claim, doctor_can_access_document
@@ -24,13 +31,15 @@ from app.services.documents_service import (
     DocumentMergeError,
     DocumentNotFoundError,
     create_document,
+    create_document_from_uploaded_object,
     create_merged_document,
     delete_documents,
     get_document_download_url,
     list_documents,
     update_document_parse_status,
 )
-from app.services.storage_service import StorageConfigError, StorageOperationError
+from app.services.storage_service import StorageConfigError, StorageOperationError, generate_upload_url
+from app.core.config import settings
 
 router = APIRouter(tags=["documents"])
 
@@ -42,19 +51,21 @@ def _create_document_in_thread(
     file_bytes: bytes,
     uploaded_by: str | None,
     retention_class: str,
-    compression_mode: str,
 ) -> DocumentResponse:
-    with SessionLocal() as db:
-        return create_document(
-            db=db,
-            claim_id=claim_id,
-            file_name=file_name,
-            mime_type=mime_type,
-            file_bytes=file_bytes,
-            uploaded_by=uploaded_by,
-            retention_class=retention_class,
-            compression_mode=compression_mode,
-        )
+    try:
+        with SessionLocal() as db:
+            return create_document(
+                db=db,
+                claim_id=claim_id,
+                file_name=file_name,
+                mime_type=mime_type,
+                file_bytes=file_bytes,
+                uploaded_by=uploaded_by,
+                retention_class=retention_class,
+            )
+    except Exception as e:
+        logger.error(f"Thread error for claim {claim_id}: {type(e).__name__}: {e}", exc_info=True)
+        raise
 
 
 def _create_merged_document_in_thread(
@@ -64,15 +75,19 @@ def _create_merged_document_in_thread(
     retention_class: str,
     compression_mode: str,
 ) -> tuple:
-    with SessionLocal() as db:
-        return create_merged_document(
-            db=db,
-            claim_id=claim_id,
-            file_items=file_items,
-            uploaded_by=uploaded_by,
-            retention_class=retention_class,
-            compression_mode=compression_mode,
-        )
+    try:
+        with SessionLocal() as db:
+            return create_merged_document(
+                db=db,
+                claim_id=claim_id,
+                file_items=file_items,
+                uploaded_by=uploaded_by,
+                retention_class=retention_class,
+                compression_mode=compression_mode,
+            )
+    except Exception as e:
+        logger.error(f"Merged thread error for claim {claim_id}: {type(e).__name__}: {e}", exc_info=True)
+        raise
 
 
 @router.post(
@@ -85,7 +100,6 @@ async def upload_document_endpoint(
     file: UploadFile = File(...),
     uploaded_by: str | None = Form(default=None),
     retention_class: str = Form(default="standard"),
-    compression_mode: str = Form(default="lossy"),
     current_user: AuthenticatedUser = Depends(require_roles(UserRole.super_admin, UserRole.user)),
 ) -> DocumentResponse:
     content = await file.read()
@@ -105,7 +119,84 @@ async def upload_document_endpoint(
             content,
             uploaded_by or current_user.username,
             retention_class,
-            compression_mode,
+        )
+    except ClaimNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="claim not found") from exc
+    except StorageConfigError as exc:
+        raise HTTPException(status_code=500, detail=f"storage config error: {exc}") from exc
+    except StorageOperationError as exc:
+        raise HTTPException(status_code=502, detail=f"storage operation error: {exc}") from exc
+    except Exception as exc:
+        logger.error(f"Upload error for claim {claim_id}: {type(exc).__name__}: {exc}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"upload error: {type(exc).__name__}: {str(exc)}") from exc
+
+
+@router.post(
+    "/claims/{claim_id}/documents/presigned-url",
+    response_model=DocumentPresignedUploadUrlResponse,
+)
+def create_document_presigned_url_endpoint(
+    claim_id: UUID,
+    payload: DocumentUploadCompleteRequest,
+    db: Session = Depends(get_db),
+    current_user: AuthenticatedUser = Depends(require_roles(UserRole.super_admin, UserRole.user)),
+) -> DocumentPresignedUploadUrlResponse:
+    if not payload.storage_key:
+        safe_name = Path(payload.file_name or "document").name or "document"
+        payload = payload.model_copy(update={
+            "storage_key": f"claims/{claim_id}/documents/{uuid4().hex}_{safe_name}"
+        })
+
+    if current_user.role == UserRole.doctor:
+        allowed = doctor_can_access_claim(db, claim_id, current_user.username)
+        if allowed is False:
+            raise HTTPException(status_code=403, detail="doctor can access only assigned claims")
+
+    try:
+        upload = generate_upload_url(
+            object_key=payload.storage_key,
+            content_type=payload.mime_type or "application/octet-stream",
+            expires_in=max(900, int(settings.verifai_presigned_url_expires_in)),
+        )
+        return DocumentPresignedUploadUrlResponse(
+            claim_id=claim_id,
+            storage_key=upload["key"],
+            upload_url=upload["upload_url"],
+            expires_in=int(upload["expires_in"]),
+        )
+    except StorageConfigError as exc:
+        raise HTTPException(status_code=500, detail=f"storage config error: {exc}") from exc
+    except StorageOperationError as exc:
+        raise HTTPException(status_code=502, detail=f"storage operation error: {exc}") from exc
+
+
+@router.post(
+    "/claims/{claim_id}/documents/upload-complete",
+    response_model=DocumentResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+def complete_document_upload_endpoint(
+    claim_id: UUID,
+    payload: DocumentUploadCompleteRequest,
+    db: Session = Depends(get_db),
+    current_user: AuthenticatedUser = Depends(require_roles(UserRole.super_admin, UserRole.user)),
+) -> DocumentResponse:
+    if current_user.role == UserRole.doctor:
+        allowed = doctor_can_access_claim(db, claim_id, current_user.username)
+        if allowed is False:
+            raise HTTPException(status_code=403, detail="doctor can access only assigned claims")
+
+    try:
+        return create_document_from_uploaded_object(
+            db=db,
+            claim_id=claim_id,
+            storage_key=payload.storage_key,
+            file_name=payload.file_name,
+            mime_type=payload.mime_type,
+            file_size_bytes=payload.file_size_bytes,
+            uploaded_by=payload.uploaded_by or current_user.username,
+            retention_class=payload.retention_class,
+            checksum_sha256=payload.checksum_sha256,
         )
     except ClaimNotFoundError as exc:
         raise HTTPException(status_code=404, detail="claim not found") from exc
@@ -200,6 +291,9 @@ async def upload_merged_document_endpoint(
         raise HTTPException(status_code=500, detail=f"storage config error: {exc}") from exc
     except StorageOperationError as exc:
         raise HTTPException(status_code=502, detail=f"storage operation error: {exc}") from exc
+    except Exception as exc:
+        logger.error(f"Merged upload error for claim {claim_id}: {type(exc).__name__}: {exc}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"merge upload error: {type(exc).__name__}: {str(exc)}") from exc
 
 
 @router.get("/claims/{claim_id}/documents", response_model=DocumentListResponse)

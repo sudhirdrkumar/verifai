@@ -1,12 +1,14 @@
 """
-Phase 5: ML-Powered Conclusion Generation using OpenAI GPT-4o Mini
+Phase 5: ML-Powered Conclusion Generation using Gemini Flash
 with Grammar Correction using LanguageTool
 """
 
 import json
 import logging
 import os
-from openai import OpenAI
+from typing import Any
+
+import httpx
 
 logger = logging.getLogger(__name__)
 
@@ -53,29 +55,39 @@ class Phase5MLGenerator:
     def __init__(self, api_key: str = None):
         # Get API key from parameter, environment variable, or config
         if not api_key:
-            api_key = os.getenv("OPENAI_API_KEY")
+            api_key = os.getenv("GEMINI_API_KEY") or os.getenv("OPENAI_API_KEY")
             logger.info(f"API key from environment: {bool(api_key)}")
 
         if not api_key:
             try:
                 from app.core.config import settings
-                api_key = getattr(settings, 'openai_api_key', None)
+                api_key = getattr(settings, "gemini_api_key", None) or getattr(settings, "openai_api_key", None)
                 logger.info(f"API key from settings: {bool(api_key)}")
             except Exception as e:
                 logger.error(f"Error loading settings: {e}")
 
         if not api_key:
-            raise ValueError("OPENAI_API_KEY not configured. Set OPENAI_API_KEY environment variable or add to .env file")
+            raise ValueError("GEMINI_API_KEY not configured. Set GEMINI_API_KEY environment variable or add to .env file")
 
-        logger.info(f"Initializing OpenAI client with API key (first 20 chars): {api_key[:20]}...")
+        base_url = os.getenv("GEMINI_BASE_URL")
+        if not base_url:
+            try:
+                from app.core.config import settings
+                base_url = getattr(settings, "gemini_base_url", None) or getattr(settings, "openai_base_url", None)
+            except Exception:
+                base_url = None
+        base_url = (base_url or "https://generativelanguage.googleapis.com/v1beta/openai").rstrip("/")
+
+        self.api_key = api_key
+        self.base_url = base_url
+
+        logger.info(f"Initializing Gemini-compatible client with API key (first 20 chars): {api_key[:20]}...")
+
         try:
-            self.client = OpenAI(api_key=api_key)
-            logger.info("OpenAI client initialized successfully")
-        except Exception as e:
-            logger.error(f"Error initializing OpenAI client: {e}")
-            raise
-
-        self.model = "gpt-4o-mini"  # OpenAI GPT-4o Mini
+            from app.core.config import settings
+            self.model = getattr(settings, "gemini_flash_model", None) or getattr(settings, "openai_model", None) or "gemini-2.5-flash"
+        except Exception:
+            self.model = "gemini-2.5-flash"
         logger.info(f"Model set to: {self.model}")
 
         # Initialize grammar tool once (class-level, cached) - non-blocking
@@ -181,9 +193,9 @@ Therefore, the claim is justified and approved for the amount of ₹{claim_amoun
                 logger.info(f"Using LOCAL template processing for {case_type}")
                 return self._generate_routine_conclusion(claim_data, case_type)
             else:
-                # Use OpenAI for complex cases (fever, sepsis, conservative, drug misuse, etc.)
-                logger.info(f"Using OPENAI processing for {case_type}")
-                return self._generate_complex_conclusion_with_openai(claim_data)
+                # Use Gemini for complex cases (fever, sepsis, conservative, drug misuse, etc.)
+                logger.info(f"Using GEMINI processing for {case_type}")
+                return self._generate_complex_conclusion_with_gemini(claim_data)
 
         except Exception as e:
             logger.error(f"Error in hybrid generate_conclusion: {type(e).__name__}: {e}")
@@ -191,30 +203,19 @@ Therefore, the claim is justified and approved for the amount of ₹{claim_amoun
             logger.error(f"Traceback: {traceback.format_exc()}")
             raise
 
-    def _generate_complex_conclusion_with_openai(self, claim_data: dict) -> dict:
-        """Generate detailed conclusion for complex cases using OpenAI"""
+    def _generate_complex_conclusion_with_gemini(self, claim_data: dict) -> dict:
+        """Generate detailed conclusion for complex cases using Gemini."""
         try:
             prompt = self._build_prompt(claim_data)
 
-            response = self.client.chat.completions.create(
-                model=self.model,
-                messages=[
-                    {
-                        "role": "system",
-                        "content": """You are a senior medical claims reviewer with 15+ years of experience.
+            conclusion_text, tokens_used, used_model = self._chat_completion(
+                prompt=prompt,
+                system_prompt="""You are a senior medical claims reviewer with 15+ years of experience.
 Analyze claims comprehensively, identify documentation gaps, assess clinical appropriateness,
-and provide detailed, specific recommendations. Be critical and thorough."""
-                    },
-                    {
-                        "role": "user",
-                        "content": prompt
-                    }
-                ],
+and provide detailed, specific recommendations. Be critical and thorough.""",
                 temperature=0.7,
-                max_tokens=1500
+                max_tokens=1500,
             )
-
-            conclusion_text = response.choices[0].message.content
 
             # Improve grammar and quality
             conclusion_text = self._improve_grammar_and_quality(conclusion_text)
@@ -226,13 +227,68 @@ and provide detailed, specific recommendations. Be critical and thorough."""
                 "conclusion": conclusion_text,
                 "confidence_score": confidence,
                 "recommendation": recommendation,
-                "tokens_used": response.usage.total_tokens,
-                "model": self.model,
-                "processing_type": "COMPLEX_OPENAI"
+                "tokens_used": tokens_used,
+                "model": used_model,
+                "processing_type": "COMPLEX_GEMINI"
             }
         except Exception as e:
-            logger.error(f"Error in OpenAI processing: {type(e).__name__}: {e}")
+            logger.error(f"Error in Gemini processing: {type(e).__name__}: {e}")
             raise
+
+    def _generate_complex_conclusion_with_openai(self, claim_data: dict) -> dict:
+        """Backward-compatible alias for the Gemini route."""
+        return self._generate_complex_conclusion_with_gemini(claim_data)
+
+    def _chat_completion(
+        self,
+        prompt: str,
+        system_prompt: str,
+        temperature: float = 0.7,
+        max_tokens: int = 1500,
+    ) -> tuple[str, int, str]:
+        url = f"{self.base_url}/chat/completions"
+        payload = {
+            "model": self.model,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": prompt},
+            ],
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+        }
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json",
+        }
+        with httpx.Client(timeout=120.0) as client:
+            response = client.post(url, headers=headers, json=payload)
+            response.raise_for_status()
+        body = response.json()
+        if not isinstance(body, dict):
+            body = {}
+        choices = body.get("choices") if isinstance(body.get("choices"), list) else []
+        message = (choices[0].get("message") if choices and isinstance(choices[0], dict) else {}) if choices else {}
+        content = ""
+        if isinstance(message, dict):
+            msg_content = message.get("content")
+            if isinstance(msg_content, str):
+                content = msg_content.strip()
+            elif isinstance(msg_content, list):
+                parts: list[str] = []
+                for item in msg_content:
+                    if isinstance(item, dict):
+                        text = item.get("text") or item.get("content")
+                        if isinstance(text, str) and text.strip():
+                            parts.append(text.strip())
+                content = "\n".join(parts).strip()
+        usage = body.get("usage") if isinstance(body.get("usage"), dict) else {}
+        total_tokens = 0
+        if isinstance(usage, dict):
+            total_tokens = int(usage.get("total_tokens") or 0)
+            if not total_tokens:
+                total_tokens = int((usage.get("input_tokens") or 0) + (usage.get("output_tokens") or 0))
+        used_model = str(body.get("model") or self.model)
+        return content, total_tokens, used_model
 
     def _build_prompt(self, claim_data: dict) -> str:
         """Build professional QC-style conclusion matching standard format"""

@@ -141,7 +141,7 @@ def extract_via_s3_presigned_url(
                 logger.info(f"Extracting {len(chunks)} PDF chunks from {document_name}")
                 combined_result = {
                     "provider": "openai-s3-direct-chunked",
-                    "model_name": "gpt-4o-mini",
+                    "model_name": "gemini-2.5-flash",
                     "extraction_version": "openai-v2-s3-direct-chunked",
                     "extracted_entities": {},
                     "evidence_refs": [],
@@ -252,7 +252,7 @@ def _call_openai_with_pdf_bytes(
     }
 
     payload = {
-        "model": "gpt-4o-mini",
+        "model": "gemini-2.5-flash",
         "messages": [
             {
                 "role": "user",
@@ -280,7 +280,7 @@ def _call_openai_with_pdf_bytes(
 
         return {
             "provider": "openai-pdf-bytes",
-            "model_name": "gpt-4o-mini",
+            "model_name": "gemini-2.5-flash",
             "extraction_version": "openai-v2-pdf-bytes",
             "extracted_entities": extracted.get("extracted_entities", {}) if isinstance(extracted, dict) else {},
             "evidence_refs": [],
@@ -384,7 +384,7 @@ def _call_openai_with_s3_url(
     }
 
     payload = {
-        "model": "gpt-4o-mini",
+        "model": "gemini-2.5-flash",
         "messages": [
             {
                 "role": "user",
@@ -420,7 +420,7 @@ def _call_openai_with_s3_url(
 
         return {
             "provider": "openai-s3-direct",
-            "model_name": "gpt-4o-mini",
+            "model_name": "gemini-2.5-flash",
             "extraction_version": "openai-v2-s3-direct",
             "extracted_entities": extracted,
             "evidence_refs": [],

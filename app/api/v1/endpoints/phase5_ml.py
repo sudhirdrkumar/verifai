@@ -1,5 +1,5 @@
 """
-PHASE 5: ML-Powered Conclusion Generation using OpenAI GPT-4 Omni
+PHASE 5: ML-Powered Conclusion Generation using Gemini Flash
 """
 
 import logging
@@ -29,7 +29,7 @@ async def generate_conclusion(
     _current_user: AuthenticatedUser = Depends(require_roles(UserRole.super_admin, UserRole.user, UserRole.doctor, UserRole.auditor)),
 ):
     """
-    Generate medical conclusion using OpenAI GPT-4 Omni.
+    Generate medical conclusion using Gemini Flash.
 
     Request body should include:
     - chief_complaint: Patient's primary complaint
@@ -49,7 +49,7 @@ async def generate_conclusion(
             raise ValueError("claim_id is required")
 
         logger.info(f"Generating conclusion for claim: {claim_data.get('claim_id')}")
-        # Generate conclusion using OpenAI
+        # Generate conclusion using Gemini
         ml_generator = get_ml_generator()
         result = ml_generator.generate_conclusion(claim_data)
         logger.info(f"Successfully generated conclusion, tokens: {result.get('tokens_used')}")
@@ -78,7 +78,7 @@ async def generate_conclusion(
                 "recommendation": result["recommendation"],
                 "tokens_used": result["tokens_used"],
                 "model": result["model"],
-                "draft_id": f"draft_{claim_data.get('claim_id')}_openai",
+                "draft_id": f"draft_{claim_data.get('claim_id')}_gemini",
                 "status": "pending_review"
             }
         }
@@ -142,7 +142,7 @@ async def get_model_performance():
     return {
         "success": True,
         "data": {
-            "model": "OpenAI GPT-4 Omni",
+            "model": "VerifAI",
             "status": "active",
             "performance": {
                 "avg_confidence": 0.82,
@@ -164,7 +164,7 @@ async def get_claim_with_ml_confidence(claim_id: str):
         "success": True,
         "data": {
             "claim_id": claim_id,
-            "ml_model": "OpenAI GPT-4 Omni",
+            "ml_model": "VerifAI",
             "ml_status": "ready_for_analysis"
         }
     }

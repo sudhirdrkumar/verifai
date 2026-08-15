@@ -933,6 +933,9 @@ def _normalize_extracted_entities(raw_entities: Any, fallback_text: str = "") ->
     normalized["all_investigation_reports_with_values"] = investigation_rows
     normalized["all_investigation_report_lines"] = [row.get("line", "") for row in investigation_rows if row.get("line")]
     normalized["detailed_conclusion"] = detailed_conclusion_text
+    normalized["conclusion"] = _to_text(normalized.get("conclusion")) or detailed_conclusion_text
+    normalized["recommendation"] = _to_text(normalized.get("recommendation")) or _to_text(normalized.get("final_recommendation")) or ("QUERY" if detailed_conclusion_text else "QUERY")
+    normalized["final_recommendation"] = _to_text(normalized.get("final_recommendation")) or _to_text(normalized.get("recommendation"))
     normalized["hospital_name"] = hospital_name_text
     normalized["pharmacy_name"] = pharmacy_name_text
     normalized["gst_number"] = gst_number_text
@@ -960,6 +963,9 @@ def _normalize_extracted_entities(raw_entities: Any, fallback_text: str = "") ->
         "clinical_findings",
         "all_investigation_reports_with_values",
         "detailed_conclusion",
+        "conclusion",
+        "recommendation",
+        "final_recommendation",
     ]
 
     # Keep output user-friendly for non-clinical documents that naturally have sparse medical fields.
@@ -1784,7 +1790,7 @@ def _extract_openai(
     }
 
     # Force single model for extraction to avoid fallback bursts and keep consistency.
-    configured_model = "gpt-4o-mini"
+    configured_model = "gemini-2.5-flash"
     model_candidates: list[str] = [configured_model]
 
     model_name = configured_model

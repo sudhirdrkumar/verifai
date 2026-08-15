@@ -1,4 +1,4 @@
-<!doctype html>
+﻿<!doctype html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">
@@ -32,7 +32,13 @@
     </section>
   </main>
 
-  <script src="/qc/public/workspace.js?v=20260814e"></script>
+  <script>
+    window.showUploadAfterPrompt = window.showUploadAfterPrompt || function () {};
+    window.updateUploadAfterPromptProgress = window.updateUploadAfterPromptProgress || function () {};
+    var showUploadAfterPrompt = window.showUploadAfterPrompt;
+    var updateUploadAfterPromptProgress = window.updateUploadAfterPromptProgress;
+  </script>
+    <script src="/qc/public/workspace-20260815h.js"></script>
 </body>
 </html>
 

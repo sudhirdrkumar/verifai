@@ -34,6 +34,23 @@ class DocumentListResponse(BaseModel):
     items: list[DocumentResponse]
 
 
+class DocumentPresignedUploadUrlResponse(BaseModel):
+    claim_id: UUID
+    storage_key: str
+    upload_url: str
+    expires_in: int
+
+
+class DocumentUploadCompleteRequest(BaseModel):
+    storage_key: str
+    file_name: str
+    mime_type: str = "application/octet-stream"
+    file_size_bytes: int | None = None
+    checksum_sha256: str | None = None
+    uploaded_by: str | None = Field(default=None, max_length=100)
+    retention_class: str = Field(default="standard", max_length=50)
+
+
 class DocumentParseStatusUpdateRequest(BaseModel):
     parse_status: ParseStatus
     actor_id: str | None = Field(default=None, max_length=100)

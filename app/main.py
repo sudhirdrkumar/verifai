@@ -1,4 +1,5 @@
 from pathlib import Path
+import logging
 
 from fastapi import FastAPI
 from fastapi.responses import HTMLResponse, RedirectResponse
@@ -10,8 +11,10 @@ from app.db.migrations import run_pending_migrations
 from app.middleware.request_monitoring import RequestMonitoringMiddleware, TransactionGuardMiddleware
 from app.services.medicine_rectify_scheduler import medicine_rectify_scheduler
 from app.services.folder_sync_scheduler import folder_sync_scheduler
+from app.services.extraction_queue_service import extraction_queue_service
 
 app = FastAPI(title=settings.app_name)
+logger = logging.getLogger(__name__)
 
 # Add monitoring middleware (must be added before routers)
 app.add_middleware(TransactionGuardMiddleware)
@@ -30,15 +33,20 @@ app.mount("/qc/public", StaticFiles(directory=str(QC_WEB_ROOT / "public")), name
 
 @app.on_event("startup")
 async def on_startup() -> None:
-    run_pending_migrations()
+    try:
+        run_pending_migrations()
+    except Exception as exc:
+        logger.warning("Startup migrations failed but app boot will continue: %s", exc, exc_info=True)
     medicine_rectify_scheduler.start()
     await folder_sync_scheduler.start()
+    extraction_queue_service.start()
 
 
 @app.on_event("shutdown")
 async def on_shutdown() -> None:
     await medicine_rectify_scheduler.stop()
     await folder_sync_scheduler.stop()
+    extraction_queue_service.stop()
 
 
 @app.get("/")

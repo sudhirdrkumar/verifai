@@ -900,7 +900,7 @@ def _run_openai_merged_medical_audit(claim_text: str) -> dict[str, Any]:
     }
 
     # Force single model for merged audit to prevent fallback bursts.
-    configured_model = "gpt-4.1-mini"
+    configured_model = "gemini-2.5-flash"
     model_candidates: list[str] = [configured_model]
 
     errors: list[str] = []

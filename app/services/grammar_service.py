@@ -73,7 +73,7 @@ def _parse_json_dict_from_text(raw_text: str) -> dict[str, Any] | None:
 
 def _normalize_model_name(raw_model: str | None) -> str:
     configured_model_raw = str(raw_model or "").strip()
-    configured_model = configured_model_raw.replace("_", ".") if configured_model_raw else "gpt-4o-mini"
+    configured_model = configured_model_raw.replace("_", ".") if configured_model_raw else "gemini-2.5-flash"
     return configured_model
 
 
@@ -194,7 +194,12 @@ def _run_grammar_batch_openai(segments: list[str]) -> tuple[list[str], str]:
     )
 
     model_candidates: list[str] = []
-    for candidate in [_normalize_model_name(settings.openai_model), "gpt-4o-mini", "gpt-4.1-mini", "gpt-4o"]:
+    for candidate in [
+        _normalize_model_name(settings.gemini_flash_model),
+        _normalize_model_name(settings.openai_model),
+        "gemini-2.5-flash",
+        "gemini-2.5-pro",
+    ]:
         c = str(candidate or "").strip()
         if c and c not in model_candidates:
             model_candidates.append(c)

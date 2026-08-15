@@ -2,6 +2,7 @@
 import json
 import mimetypes
 import re
+import logging
 from datetime import datetime, timezone
 from io import BytesIO
 from pathlib import Path
@@ -30,6 +31,8 @@ from app.services.storage_service import (
     upload_bytes,
     _s3_client,
 )
+
+logger = logging.getLogger(__name__)
 
 
 class ClaimNotFoundError(Exception):
@@ -85,6 +88,14 @@ def _normalize_metadata(value: Any) -> dict[str, Any]:
 def _to_document_response(row: dict[str, Any]) -> DocumentResponse:
     row["metadata"] = _normalize_metadata(row.get("metadata"))
     return DocumentResponse.model_validate(row)
+
+
+def _safe_document_response(row: dict[str, Any]) -> DocumentResponse | None:
+    try:
+        return _to_document_response(row)
+    except Exception as exc:
+        logger.warning("Skipping malformed document row for list view: %s", exc, exc_info=True)
+        return None
 
 
 def _sanitize_filename(name: str) -> str:
@@ -583,6 +594,102 @@ def create_document(
     return document
 
 
+def create_document_from_uploaded_object(
+    db: Session,
+    claim_id: UUID,
+    storage_key: str,
+    file_name: str,
+    mime_type: str,
+    file_size_bytes: int | None,
+    uploaded_by: str | None,
+    retention_class: str,
+    checksum_sha256: str | None = None,
+) -> DocumentResponse:
+    if not _claim_exists(db, claim_id):
+        raise ClaimNotFoundError
+
+    safe_file_name = _sanitize_filename(file_name)
+    normalized_storage_key = str(storage_key or "").strip()
+    if not normalized_storage_key:
+        raise StorageOperationError("storage key is required")
+
+    metadata = {
+        "storage_provider": "s3",
+        "bucket": settings.s3_bucket,
+        "region": settings.s3_region,
+        "s3_url": _public_s3_object_url(settings.s3_bucket, normalized_storage_key),
+        "upload_flow": "presigned_put",
+    }
+
+    row = db.execute(
+        text(
+            """
+            INSERT INTO claim_documents (
+                claim_id,
+                storage_key,
+                file_name,
+                mime_type,
+                file_size_bytes,
+                checksum_sha256,
+                parse_status,
+                retention_class,
+                uploaded_by,
+                metadata
+            )
+            VALUES (
+                :claim_id,
+                :storage_key,
+                :file_name,
+                :mime_type,
+                :file_size_bytes,
+                :checksum_sha256,
+                'pending',
+                :retention_class,
+                :uploaded_by,
+                CAST(:metadata AS jsonb)
+            )
+            RETURNING
+                id,
+                claim_id,
+                storage_key,
+                file_name,
+                mime_type,
+                file_size_bytes,
+                checksum_sha256,
+                parse_status,
+                page_count,
+                retention_class,
+                uploaded_by,
+                uploaded_at,
+                parsed_at,
+                metadata
+            """
+        ),
+        {
+            "claim_id": str(claim_id),
+            "storage_key": normalized_storage_key,
+            "file_name": safe_file_name,
+            "mime_type": mime_type,
+            "file_size_bytes": file_size_bytes,
+            "checksum_sha256": checksum_sha256,
+            "retention_class": retention_class,
+            "uploaded_by": uploaded_by,
+            "metadata": json.dumps(metadata),
+        },
+    ).mappings().one()
+
+    document = _to_document_response(dict(row))
+    _emit_workflow_event(
+        db=db,
+        claim_id=claim_id,
+        event_type="document_uploaded",
+        actor_id=uploaded_by,
+        payload={"document_id": str(document.id), "storage_key": document.storage_key},
+    )
+    db.commit()
+    return document
+
+
 def _detect_merge_file_kind(file_name: str, mime_type: str) -> str:
     ext = Path(file_name or "").suffix.lower()
     mime = str(mime_type or "").lower().strip()
@@ -937,39 +1044,48 @@ def list_documents(db: Session, claim_id: UUID, limit: int, offset: int) -> Docu
         # Never block document listing because of legacy payload parsing/materialization errors.
         db.rollback()
     params = {"claim_id": str(claim_id), "limit": limit, "offset": offset}
-    total = db.execute(
-        text("SELECT COUNT(*) FROM claim_documents WHERE claim_id = :claim_id"),
-        params,
-    ).scalar_one()
+    try:
+        total = db.execute(
+            text("SELECT COUNT(*) FROM claim_documents WHERE claim_id = :claim_id"),
+            params,
+        ).scalar_one()
 
-    rows = db.execute(
-        text(
-            """
-            SELECT
-                id,
-                claim_id,
-                storage_key,
-                file_name,
-                mime_type,
-                file_size_bytes,
-                checksum_sha256,
-                parse_status,
-                page_count,
-                retention_class,
-                uploaded_by,
-                uploaded_at,
-                parsed_at,
-                metadata
-            FROM claim_documents
-            WHERE claim_id = :claim_id
-            ORDER BY uploaded_at DESC
-            LIMIT :limit OFFSET :offset
-            """
-        ),
-        params,
-    ).mappings().all()
+        rows = db.execute(
+            text(
+                """
+                SELECT
+                    id,
+                    claim_id,
+                    storage_key,
+                    file_name,
+                    mime_type,
+                    file_size_bytes,
+                    checksum_sha256,
+                    parse_status,
+                    page_count,
+                    retention_class,
+                    uploaded_by,
+                    uploaded_at,
+                    parsed_at,
+                    metadata
+                FROM claim_documents
+                WHERE claim_id = :claim_id
+                ORDER BY uploaded_at DESC
+                LIMIT :limit OFFSET :offset
+                """
+            ),
+            params,
+        ).mappings().all()
+    except Exception as exc:
+        logger.warning("Document listing query failed for claim %s: %s", claim_id, exc, exc_info=True)
+        db.rollback()
+        return DocumentListResponse(total=0, items=[])
 
-    items = [_to_document_response(dict(r)) for r in rows]
+    items = []
+    for row in rows:
+        document = _safe_document_response(dict(row))
+        if document is not None:
+            items.append(document)
     return DocumentListResponse(total=total, items=items)
 
 

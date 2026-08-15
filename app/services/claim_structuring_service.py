@@ -540,7 +540,13 @@ def _resolve_structuring_llm_targets() -> list[dict[str, Any]]:
     openai_key = _txt(settings.openai_api_key)
     if openai_key:
         openai_base = _txt(settings.openai_base_url).rstrip("/") or "https://api.openai.com/v1"
-        openai_models = _dedupe([settings.openai_rag_model, settings.openai_model, "gpt-4.1-mini", "gpt-4o-mini"])
+        openai_models = _dedupe([
+            settings.gemini_flash_model,
+            settings.openai_rag_model,
+            settings.openai_model,
+            "gemini-2.5-flash",
+            "gemini-2.5-pro",
+        ])
         if openai_models:
             targets.append(
                 {

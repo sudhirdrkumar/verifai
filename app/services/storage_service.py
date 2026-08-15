@@ -1,4 +1,4 @@
-﻿from urllib.parse import quote
+from urllib.parse import quote
 
 import boto3
 from botocore.exceptions import BotoCoreError, ClientError
@@ -55,6 +55,30 @@ def upload_bytes(object_key: str, payload: bytes, content_type: str) -> dict:
         "key": object_key,
         "url": _public_object_url(settings.s3_bucket, object_key),
         "etag": response.get("ETag", "").strip('"'),
+    }
+
+
+def generate_upload_url(object_key: str, content_type: str, expires_in: int = 900) -> dict:
+    client = _s3_client()
+    try:
+        upload_url = client.generate_presigned_url(
+            "put_object",
+            Params={
+                "Bucket": settings.s3_bucket,
+                "Key": object_key,
+                "ContentType": content_type or "application/octet-stream",
+            },
+            ExpiresIn=expires_in,
+        )
+    except (ClientError, BotoCoreError) as exc:
+        raise StorageOperationError(f"S3 presign upload failed: {exc}") from exc
+
+    return {
+        "bucket": settings.s3_bucket,
+        "region": settings.s3_region,
+        "key": object_key,
+        "upload_url": upload_url,
+        "expires_in": expires_in,
     }
 
 

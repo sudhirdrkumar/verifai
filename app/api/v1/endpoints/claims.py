@@ -2,8 +2,10 @@
 import re
 from uuid import UUID
 from html import unescape
+from datetime import datetime
 
 import httpx
+import redis
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import text
@@ -28,6 +30,8 @@ from app.schemas.claim import (
     ClaimStructuredDataRequest,
     ClaimStructuredDataResponse,
     CreateClaimRequest,
+    BulkProcessRequest,
+    BulkProcessResponse,
 )
 from app.services.access_control import doctor_matches_assignment
 from app.services.auth_service import AuthenticatedUser
@@ -957,7 +961,13 @@ def _resolve_conclusion_llm_targets() -> list[dict[str, str | list[str]]]:
     openai_key = str(settings.openai_api_key or "").strip()
     if openai_key:
         openai_base = str(settings.openai_base_url or "").strip().rstrip("/") or "https://api.openai.com/v1"
-        openai_models = _dedupe_model_candidates([settings.openai_rag_model, settings.openai_model, "gpt-4.1-mini", "gpt-4o-mini"])
+        openai_models = _dedupe_model_candidates([
+            settings.gemini_flash_model,
+            settings.openai_rag_model,
+            settings.openai_model,
+            "gemini-2.5-flash",
+            "gemini-2.5-pro",
+        ])
         if openai_models:
             targets.append(
                 {
@@ -1794,10 +1804,256 @@ def get_claim_structured_data_endpoint(
             raise HTTPException(status_code=500, detail=f"structured data generation failed: {exc}") from exc
 
 
+@router.post("/{claim_id}/process")
+def process_claim_endpoint(
+    claim_id: UUID,
+    db: Session = Depends(get_db),
+    current_user: AuthenticatedUser = Depends(require_roles(UserRole.super_admin, UserRole.user, UserRole.doctor, UserRole.auditor)),
+) -> dict:
+    import logging
+    logger = logging.getLogger(__name__)
+
+    try:
+        existing = get_claim(db, claim_id)
+    except ClaimNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="claim not found") from exc
+
+    if current_user.role == UserRole.doctor and not doctor_matches_assignment(existing.assigned_doctor_id, current_user.username):
+        raise HTTPException(status_code=403, detail="doctor can queue only assigned claims")
+
+    from sqlalchemy import text
+    from app.services.extraction_queue_service import extraction_queue_service
+    from app.schemas.extraction import ExtractionProvider
+
+    try:
+        documents = db.execute(
+            text("SELECT id FROM claim_documents WHERE claim_id = :claim_id"),
+            {"claim_id": str(claim_id)}
+        ).fetchall()
+
+        logger.info(f"Processing claim {claim_id}: found {len(documents)} documents")
+
+        if not documents:
+            raise HTTPException(status_code=404, detail="no documents found for claim")
+
+        queued_jobs = []
+        for (doc_id,) in documents:
+            try:
+                doc_uuid = UUID(str(doc_id)) if not isinstance(doc_id, UUID) else doc_id
+            except Exception as uuid_err:
+                logger.error(f"Failed to convert doc_id to UUID: {doc_id}, error: {uuid_err}")
+                continue
+
+            existing_job = db.execute(
+                text("SELECT id FROM extraction_jobs WHERE document_id = :doc_id AND status IN ('queued', 'processing')"),
+                {"doc_id": str(doc_uuid)}
+            ).fetchone()
+
+            if existing_job:
+                logger.info(f"Document {doc_uuid} already has job {existing_job[0]} in progress, skipping")
+                continue
+
+            logger.info(f"Queueing document {doc_uuid} for extraction")
+            job = extraction_queue_service.enqueue(
+                document_id=doc_uuid,
+                provider=ExtractionProvider.auto,
+                actor_id=current_user.username,
+                force_refresh=False
+            )
+            job_id = job.job_id if hasattr(job, 'job_id') else job.id
+            queued_jobs.append(str(job_id))
+            logger.info(f"Queued job {job_id}")
+
+        if len(queued_jobs) == 0:
+            message = f"No new jobs queued - all {len(documents)} documents already have extraction jobs in progress or queued"
+        else:
+            message = f"✅ Claim queued: {len(queued_jobs)} document(s) added to extraction queue"
+
+        return {
+            "status": "queued",
+            "claim_id": str(claim_id),
+            "documents_queued": len(queued_jobs),
+            "job_ids": queued_jobs,
+            "message": message
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Process claim endpoint error: {type(e).__name__}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"failed to queue claim: {type(e).__name__}: {str(e)}") from e
 
 
+@router.post("/extraction-jobs/resend-to-queue", response_model=dict)
+def resend_extracted_to_queue_endpoint(
+    db: Session = Depends(get_db),
+    current_user: AuthenticatedUser = Depends(require_roles(UserRole.super_admin, UserRole.user)),
+) -> dict:
+    """Resend successfully extracted documents to Stage 2 queue for Gemini processing."""
+    import logging
+    logger = logging.getLogger(__name__)
+
+    from sqlalchemy import text
+    from app.services.extraction_queue_service import extraction_queue_service
+    from app.schemas.extraction import ExtractionProvider
+
+    try:
+        # Get all extraction jobs with 'succeeded' status
+        extraction_jobs = db.execute(
+            text("""
+                SELECT id, claim_id, document_id
+                FROM extraction_jobs
+                WHERE status = 'succeeded'
+                AND created_at >= NOW() - INTERVAL '7 days'
+            """)
+        ).fetchall()
+
+        queued_count = 0
+        skipped_count = 0
+        errors = []
+
+        for job_id, claim_id, document_id in extraction_jobs:
+            try:
+                # Check if claim already has a structured data record
+                existing = db.execute(
+                    text("SELECT id FROM claim_structured_data WHERE claim_id = :claim_id"),
+                    {"claim_id": str(claim_id)}
+                ).fetchone()
+
+                if existing:
+                    skipped_count += 1
+                    logger.info(f"Skipping claim {claim_id} - already structured")
+                    continue
+
+                # Queue for Stage 2 (Gemini processing)
+                queue_payload = {
+                    "claim_id": str(claim_id),
+                    "source": "extraction_job",
+                    "timestamp": datetime.now().isoformat()
+                }
+
+                # Push to Redis queue
+                import redis
+                r = redis.Redis(host='127.0.0.1', port=6379, decode_responses=True)
+                r.rpush('queue:stage2_claim_reduction', json.dumps(queue_payload))
+
+                queued_count += 1
+                logger.info(f"Requeued claim {claim_id} to Stage 2")
+
+            except Exception as e:
+                logger.error(f"Error queueing claim {claim_id}: {e}")
+                errors.append(str(e))
+
+        return {
+            "status": "success",
+            "requeued_count": queued_count,
+            "skipped_count": skipped_count,
+            "message": f"✅ Requeued {queued_count} claims for Stage 2 processing ({skipped_count} already structured)",
+            "errors": errors
+        }
+
+    except Exception as e:
+        logger.error(f"Resend to queue error: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to resend: {str(e)}")
 
 
+@router.post("/claims/bulk/process", response_model=BulkProcessResponse)
+def bulk_process_claims_endpoint(
+    payload: BulkProcessRequest,
+    db: Session = Depends(get_db),
+    current_user: AuthenticatedUser = Depends(require_roles(UserRole.super_admin, UserRole.user)),
+) -> BulkProcessResponse:
+    import logging
+    logger = logging.getLogger(__name__)
+
+    from sqlalchemy import text
+    from app.services.extraction_queue_service import extraction_queue_service
+    from app.schemas.extraction import ExtractionProvider
+
+    results = []
+    queued_claims = 0
+    total_documents_queued = 0
+
+    for claim_id in payload.claim_ids:
+        try:
+            existing = get_claim(db, claim_id)
+        except ClaimNotFoundError:
+            results.append({
+                "claim_id": str(claim_id),
+                "status": "failed",
+                "reason": "claim not found"
+            })
+            continue
+
+        if current_user.role == UserRole.doctor and not doctor_matches_assignment(existing.assigned_doctor_id, current_user.username):
+            results.append({
+                "claim_id": str(claim_id),
+                "status": "skipped",
+                "reason": "doctor cannot access this claim"
+            })
+            continue
+
+        try:
+            documents = db.execute(
+                text("SELECT id FROM claim_documents WHERE claim_id = :claim_id"),
+                {"claim_id": str(claim_id)}
+            ).fetchall()
+
+            if not documents:
+                results.append({
+                    "claim_id": str(claim_id),
+                    "status": "skipped",
+                    "reason": "no documents found"
+                })
+                continue
+
+            queued_jobs = []
+            for (doc_id,) in documents:
+                try:
+                    doc_uuid = UUID(str(doc_id)) if not isinstance(doc_id, UUID) else doc_id
+                except Exception:
+                    continue
+
+                existing_job = db.execute(
+                    text("SELECT id FROM extraction_jobs WHERE document_id = :doc_id AND status IN ('queued', 'processing')"),
+                    {"doc_id": str(doc_uuid)}
+                ).fetchone()
+
+                if not existing_job:
+                    job = extraction_queue_service.enqueue(
+                        document_id=doc_uuid,
+                        provider=ExtractionProvider.auto,
+                        actor_id=current_user.username,
+                        force_refresh=payload.force_refresh
+                    )
+                    job_id = job.job_id if hasattr(job, 'job_id') else job.id
+                    queued_jobs.append(str(job_id))
+
+            total_documents_queued += len(queued_jobs)
+            results.append({
+                "claim_id": str(claim_id),
+                "status": "queued" if queued_jobs else "no_new_jobs",
+                "documents_queued": len(queued_jobs),
+                "job_ids": queued_jobs
+            })
+            if queued_jobs:
+                queued_claims += 1
+
+        except Exception as e:
+            logger.error(f"Error processing claim {claim_id}: {type(e).__name__}: {e}", exc_info=True)
+            results.append({
+                "claim_id": str(claim_id),
+                "status": "error",
+                "reason": str(e)
+            })
+
+    return BulkProcessResponse(
+        total_claims=len(payload.claim_ids),
+        queued_claims=queued_claims,
+        failed_claims=len([r for r in results if r["status"] in ("error", "failed")]),
+        total_documents_queued=total_documents_queued,
+        results=results,
+        message=f"Bulk processing complete: {queued_claims} claims queued, {total_documents_queued} documents queued for extraction"
+    )
 
 
 

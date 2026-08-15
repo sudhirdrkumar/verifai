@@ -592,20 +592,9 @@ def run_s3_openai_pipeline(
         len(file_bytes),
     )
 
+    textract_result: dict[str, Any] | None = None
     try:
-        return run_extraction(
-            provider=ExtractionProvider.openai,
-            document_name=file_name,
-            mime_type=mime_type,
-            payload=file_bytes,
-            storage_key=storage_key or None,
-            s3_bucket=s3_bucket,
-        )
-    except Exception as openai_err:
-        logger.warning("Direct OpenAI extraction failed for %s: %s", file_name, openai_err)
-
-    try:
-        return run_extraction(
+        textract_result = run_extraction(
             provider=ExtractionProvider.aws_textract,
             document_name=file_name,
             mime_type=mime_type,
@@ -615,6 +604,61 @@ def run_s3_openai_pipeline(
         )
     except Exception as textract_err:
         logger.warning("AWS Textract extraction failed for %s: %s", file_name, textract_err)
+
+    if textract_result and provider == ExtractionProvider.aws_textract:
+        return textract_result
+
+    if textract_result and isinstance(textract_result.get("extracted_entities"), dict):
+        textract_entities = textract_result["extracted_entities"]
+        if any(
+            [
+                str(textract_entities.get("diagnosis") or "").strip(),
+                str(textract_entities.get("clinical_findings") or "").strip(),
+            ]
+        ):
+            logger.info("Textract result sufficient for %s; skipping Gemini flash check", file_name)
+            return textract_result
+        investigations = textract_entities.get("all_investigation_reports_with_values")
+        if isinstance(investigations, list) and len(investigations) > 0:
+            logger.info("Textract result sufficient for %s; skipping Gemini flash check", file_name)
+            return textract_result
+        medicines = textract_entities.get("medicine_used")
+        if isinstance(medicines, list) and len(medicines) > 0:
+            logger.info("Textract result sufficient for %s; skipping Gemini flash check", file_name)
+            return textract_result
+
+    try:
+        llm_result = run_extraction(
+            provider=provider,
+            document_name=file_name,
+            mime_type=mime_type,
+            payload=file_bytes,
+            storage_key=storage_key or None,
+            s3_bucket=s3_bucket,
+        )
+        if textract_result:
+            merged = dict(textract_result)
+            merged_entities = dict(textract_result.get("extracted_entities") or {})
+            llm_entities = dict(llm_result.get("extracted_entities") or {})
+            for key, value in llm_entities.items():
+                if value not in (None, "", [], {}):
+                    merged_entities[key] = value
+            merged["extracted_entities"] = merged_entities
+            merged["evidence_refs"] = list((textract_result.get("evidence_refs") or []) + (llm_result.get("evidence_refs") or []))
+            merged["provider"] = llm_result.get("provider", merged.get("provider"))
+            merged["model_name"] = llm_result.get("model_name", merged.get("model_name"))
+            merged["extraction_version"] = llm_result.get("extraction_version", merged.get("extraction_version"))
+            merged_raw = dict(textract_result.get("raw_response") or {})
+            merged_raw["gemini_flash_check"] = llm_result.get("raw_response")
+            merged["raw_response"] = merged_raw
+            return merged
+        return llm_result
+    except Exception as llm_err:
+        logger.warning("Gemini/OpenAI structured extraction failed for %s: %s", file_name, llm_err)
+
+    if textract_result:
+        logger.info("Using Textract result as fallback for %s", file_name)
+        return textract_result
 
     logger.info("Using local extraction fallback for %s", file_name)
     return run_extraction(

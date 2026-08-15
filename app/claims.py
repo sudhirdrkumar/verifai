@@ -552,8 +552,8 @@ def _generate_ai_medico_legal_conclusion(report_html: str, checklist_payload: di
     candidates = normalize_model_candidates([
         settings.openai_rag_model,
         settings.openai_model,
-        "gpt-4.1-mini",
-        "gpt-4o-mini",
+        settings.gemini_flash_model,
+        "gemini-2.5-flash",
     ])
 
     errors: list[str] = []

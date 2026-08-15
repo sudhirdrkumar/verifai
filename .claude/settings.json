@@ -1,0 +1,36 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(ssh -i 'C:\\\\Users\\\\sudhi/.ssh/verif-ai.pem' ec2-user@15.207.135.22 'sudo -u postgres psql -d qc_bkp_modern -c \"SELECT pid, usename, application_name, state, query_start, query FROM pg_stat_activity WHERE state != '\\\\''idle'\\\\'' ORDER BY query_start ASC LIMIT 15;\" 2>&1')",
+      "Bash(ssh -i 'C:\\\\Users\\\\sudhi/.ssh/verif-ai.pem' ec2-user@15.207.135.22 ' *)",
+      "Bash(ssh -i 'C:\\\\Users\\\\sudhi/.ssh/verif-ai.pem' ec2-user@15.207.135.22 'ps aux | grep uvicorn | grep -v grep')",
+      "Bash(curl -s http://127.0.0.1:8000/qc/workspace.html)",
+      "Bash(python3)",
+      "Bash(python3 -c \"from app.main import app; print\\('Backend loaded successfully!'\\)\")",
+      "Bash(ssh -i 'C:\\\\Users\\\\sudhi/.ssh/verif-ai.pem' ec2-user@15.207.135.22 'curl -s -k https://verifai.in/api/v1/claims/test-id/process -X POST 2>&1 | python3 -m json.tool 2>/dev/null | head -5')",
+      "Bash(ssh -i 'C:\\\\Users\\\\sudhi/.ssh/verif-ai.pem' ec2-user@15.207.135.22 'curl -s http://127.0.0.1:8000/api/v1/claims/test-id/process -X POST 2>&1 | head -3')",
+      "Bash(ssh -i 'C:\\\\Users\\\\sudhi/.ssh/verif-ai.pem' ec2-user@15.207.135.22 'curl -s http://127.0.0.1:8000/api/v1/claims/6279084e-f714-4649-a0dc-0537518574b6/process -X POST 2>&1')",
+      "Bash(python3 -m json.tool)",
+      "PowerShell($source = \"C:\\\\backup QC\\\\qc-python\\\\app\\\\api\\\\v1\\\\endpoints\\\\claims.py\"; $dest = \"ec2-user@15.207.135.22:/home/ec2-user/qc-python/backend/app/api/v1/endpoints/claims.py\"; & scp -i \"$env:USERPROFILE\\\\.ssh\\\\verif-ai.pem\" $source $dest 2>&1 | Select-String -NotMatch \"WARNING\")",
+      "Bash(ssh -i 'C:\\\\Users\\\\sudhi/.ssh/verif-ai.pem' ec2-user@15.207.135.22 'python3 -c \" *)",
+      "Bash(ssh -i 'C:\\\\Users\\\\sudhi/.ssh/verif-ai.pem' ec2-user@15.207.135.22 'pkill -f '\\\\''uvicorn'\\\\''; sleep 2; cd /home/ec2-user/qc-python/backend && /opt/verifai/backend/.venv/bin/python -m uvicorn app.main:app --host 0.0.0.0 --port 8000 > /tmp/backend.log 2>&1 &')",
+      "Bash(ssh -i 'C:\\\\Users\\\\sudhi/.ssh/verif-ai.pem' ec2-user@15.207.135.22 'netstat -tlnp 2>/dev/null | grep :8000')",
+      "Bash(ssh -i 'C:\\\\Users\\\\sudhi/.ssh/verif-ai.pem' ec2-user@15.207.135.22 'PGPASSWORD='\\\\''Dhoom*2690'\\\\'' psql -h 127.0.0.1 -U postgres -d qc_bkp_modern -c \"SELECT COUNT\\(*\\) FROM extraction_jobs WHERE status IN \\('\\\\''queued'\\\\'', '\\\\''running'\\\\''\\);\" 2>&1')",
+      "Bash(ssh -i 'C:\\\\Users\\\\sudhi/.ssh/verif-ai.pem' ec2-user@15.207.135.22 'sed -i '\\\\''s/\\\\r$//'\\\\'' /home/ec2-user/qc-python/backend/app/api/v1/endpoints/extractions.py && pkill -f '\\\\''uvicorn'\\\\''; sleep 2; cd /home/ec2-user/qc-python/backend && /opt/verifai/backend/.venv/bin/python -m uvicorn app.main:app --host 0.0.0.0 --port 8000 > /tmp/backend.log 2>&1 &')",
+      "Bash(ssh -i 'C:\\\\Users\\\\sudhi/.ssh/verif-ai.pem' ec2-user@15.207.135.22 'netstat -tlnp 2>/dev/null | grep :8000 && echo '\\\\''✓ Backend ready'\\\\''')",
+      "Bash(ssh -i 'C:\\\\Users\\\\sudhi/.ssh/verif-ai.pem' ec2-user@15.207.135.22 'tail -10 /tmp/backend.log')",
+      "Bash(ssh -i 'C:\\\\Users\\\\sudhi/.ssh/verif-ai.pem' ec2-user@15.207.135.22 'cd /home/ec2-user/qc-python/backend && /opt/verifai/backend/.venv/bin/python -m uvicorn app.main:app --host 0.0.0.0 --port 8000 > /tmp/backend.log 2>&1 &')",
+      "Bash(ssh -i 'C:\\\\Users\\\\sudhi/.ssh/verif-ai.pem' ec2-user@15.207.135.22 'PGPASSWORD='\\\\''Dhoom*2690'\\\\'' psql -h 127.0.0.1 -U postgres -d qc_bkp_modern -c \"SELECT COUNT\\(*\\) as pending_jobs FROM extraction_jobs WHERE status IN \\('\\\\''queued'\\\\'', '\\\\''running'\\\\''\\);\" 2>&1')",
+      "Bash(ssh -i 'C:\\\\Users\\\\sudhi/.ssh/verif-ai.pem' ec2-user@15.207.135.22 'grep '\\\\''api_v1_prefix'\\\\'' /home/ec2-user/qc-python/backend/app/core/config.py')",
+      "Bash(ssh -i 'C:\\\\Users\\\\sudhi/.ssh/verif-ai.pem' ec2-user@15.207.135.22 'curl -s '\\\\''http://localhost:8000/api/v1/extraction-jobs?limit=5'\\\\'' -H '\\\\''Authorization: Bearer test'\\\\'' 2>&1 | python3 -m json.tool | head -50')",
+      "Bash(ssh -i 'C:\\\\Users\\\\sudhi/.ssh/verif-ai.pem' ec2-user@15.207.135.22 'grep -B5 -A5 '\\\\''extractions_router'\\\\'' /home/ec2-user/qc-python/backend/app/api/router.py')",
+      "Bash(ssh -i 'C:\\\\Users\\\\sudhi/.ssh/verif-ai.pem' ec2-user@15.207.135.22 'cat /home/ec2-user/qc-python/backend/app/api/router.py | grep -A20 '\\\\''include_router'\\\\''')",
+      "Bash(ssh -i 'C:\\\\Users\\\\sudhi/.ssh/verif-ai.pem' ec2-user@15.207.135.22 'curl -s '\\\\''http://localhost:8000/api/v1/auth/me'\\\\'' -H '\\\\''Authorization: Bearer test'\\\\'' 2>&1 | python3 -m json.tool | head -10')",
+      "Bash(ssh -i 'C:\\\\Users\\\\sudhi/.ssh/verif-ai.pem' ec2-user@15.207.135.22 'curl -s '\\\\''http://localhost:8000/api/v1/documents/test/extractions?limit=1'\\\\'' -H '\\\\''Authorization: Bearer test'\\\\'' 2>&1')",
+      "Bash(ssh -i 'C:\\\\Users\\\\sudhi/.ssh/verif-ai.pem' ec2-user@15.207.135.22 'curl -s '\\\\''http://localhost:8000/api/v1/documents'\\\\'' -H '\\\\''Authorization: Bearer test'\\\\'' 2>&1 | python3 -m json.tool | head -10')",
+      "Bash(ssh -i 'C:\\\\Users\\\\sudhi/.ssh/verif-ai.pem' ec2-user@15.207.135.22 'grep -r '\\\\''include_router.*extraction'\\\\'' /home/ec2-user/qc-python/backend/app/api/ 2>/dev/null')",
+      "Bash(ssh -i 'C:\\\\Users\\\\sudhi/.ssh/verif-ai.pem' ec2-user@15.207.135.22 'sed -n '\\\\''25,27p'\\\\'' /home/ec2-user/qc-python/backend/app/services/access_control.py')",
+      "Bash(ssh -i 'C:\\\\Users\\\\sudhi/.ssh/verif-ai.pem' ec2-user@15.207.135.22 'curl -s '\\\\''http://localhost:8000/api/v1/extraction-jobs?limit=1'\\\\'' -H '\\\\''Authorization: Bearer test'\\\\'' 2>&1 | python3 -m json.tool 2>&1')"
+    ]
+  }
+}

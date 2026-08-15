@@ -1,0 +1,9 @@
+[Unit]
+Description=QC Health Watchdog
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/qc-watchdog.sh
+

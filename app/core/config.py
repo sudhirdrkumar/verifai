@@ -41,28 +41,41 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("S3_ENDPOINT_URL", "AWS_ENDPOINT_URL"),
     )
 
+    gemini_api_key: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("GEMINI_API_KEY"),
+    )
+    gemini_base_url: str | None = Field(
+        default="https://generativelanguage.googleapis.com/v1beta/openai",
+        validation_alias=AliasChoices("GEMINI_BASE_URL"),
+    )
+    gemini_flash_model: str = Field(
+        default="gemini-2.5-flash",
+        validation_alias=AliasChoices("GEMINI_FLASH_MODEL"),
+    )
+
     openai_api_key: str | None = Field(
         default=None,
-        validation_alias=AliasChoices("OPENAI_API_KEY"),
+        validation_alias=AliasChoices("GEMINI_API_KEY", "OPENAI_API_KEY"),
     )
     openai_model: str = Field(
-        default="gpt-4o-mini",
+        default="gemini-2.5-flash",
         validation_alias=AliasChoices("OPENAI_MODEL"),
     )
     openai_vision_model: str = Field(
-        default="gpt-4o-mini",
+        default="gemini-2.5-flash",
         validation_alias=AliasChoices("OPENAI_VISION_MODEL"),
     )
     openai_base_url: str | None = Field(
-        default=None,
-        validation_alias=AliasChoices("OPENAI_BASE_URL"),
+        default="https://generativelanguage.googleapis.com/v1beta/openai",
+        validation_alias=AliasChoices("GEMINI_BASE_URL", "OPENAI_BASE_URL"),
     )
     openai_embedding_model: str = Field(
         default="text-embedding-3-small",
         validation_alias=AliasChoices("OPENAI_EMBEDDING_MODEL"),
     )
     openai_rag_model: str = Field(
-        default="gpt-4o-mini",
+        default="gemini-2.5-flash",
         validation_alias=AliasChoices("OPENAI_RAG_MODEL"),
     )
     deepseek_api_key: str | None = Field(

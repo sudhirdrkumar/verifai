@@ -119,63 +119,79 @@ def run_pending_migrations() -> None:
     # Advisory locks are bound to the physical PostgreSQL session; if we use
     # an ORM Session with a pool, commits can switch connections and leave a
     # lock stranded on a different pooled connection.
-    with engine.connect() as conn:
-        conn.execute(
-            text("SELECT pg_advisory_lock(:lock_id)"),
-            {"lock_id": _MIGRATION_ADVISORY_LOCK_ID},
-        )
-        logger.info("schema_migrations: advisory lock acquired")
-        try:
-            # Bootstrap: create the migrations tracking table if it doesn't exist yet.
+    try:
+        with engine.connect() as conn:
             conn.execute(
-                text(
-                    """
-                    CREATE TABLE IF NOT EXISTS schema_migrations (
-                        version     INTEGER      PRIMARY KEY,
-                        description VARCHAR(255) NOT NULL,
-                        applied_at  TIMESTAMPTZ  NOT NULL DEFAULT NOW()
-                    )
-                    """
-                )
+                text("SELECT pg_advisory_lock(:lock_id)"),
+                {"lock_id": _MIGRATION_ADVISORY_LOCK_ID},
             )
-            conn.commit()
-
-            current_version: int = conn.execute(
-                text("SELECT COALESCE(MAX(version), 0) FROM schema_migrations")
-            ).scalar_one()
-
-            pending = [m for m in _MIGRATIONS if m[0] > current_version]
-
-            if not pending:
-                logger.info("schema_migrations: up to date at v%d", current_version)
-                return
-
-            for version, description, sql_list in pending:
-                logger.info("schema_migrations: applying v%d — %s", version, description)
-                for sql in sql_list:
-                    conn.execute(text(sql))
+            logger.info("schema_migrations: advisory lock acquired")
+            try:
+                # Bootstrap: create the migrations tracking table if it doesn't exist yet.
+                # If the connected DB user lacks CREATE privilege on public, skip
+                # startup migrations rather than crashing the whole service.
                 conn.execute(
                     text(
-                        "INSERT INTO schema_migrations (version, description) VALUES (:v, :d)"
-                    ),
-                    {"v": version, "d": description},
+                        """
+                        CREATE TABLE IF NOT EXISTS schema_migrations (
+                            version     INTEGER      PRIMARY KEY,
+                            description VARCHAR(255) NOT NULL,
+                            applied_at  TIMESTAMPTZ  NOT NULL DEFAULT NOW()
+                        )
+                        """
+                    )
                 )
                 conn.commit()
-                logger.info("schema_migrations: v%d applied", version)
 
-            latest = pending[-1][0]
-            logger.info(
-                "schema_migrations: applied %d migration(s), now at v%d",
-                len(pending),
-                latest,
-            )
-        finally:
-            unlocked = conn.execute(
-                text("SELECT pg_advisory_unlock(:lock_id)"),
-                {"lock_id": _MIGRATION_ADVISORY_LOCK_ID},
-            ).scalar_one()
-            conn.commit()
-            if unlocked:
-                logger.info("schema_migrations: advisory lock released")
-            else:
-                logger.warning("schema_migrations: advisory lock was not held on unlock")
+                current_version: int = conn.execute(
+                    text("SELECT COALESCE(MAX(version), 0) FROM schema_migrations")
+                ).scalar_one()
+
+                pending = [m for m in _MIGRATIONS if m[0] > current_version]
+
+                if not pending:
+                    logger.info("schema_migrations: up to date at v%d", current_version)
+                    return
+
+                for version, description, sql_list in pending:
+                    logger.info("schema_migrations: applying v%d — %s", version, description)
+                    for sql in sql_list:
+                        conn.execute(text(sql))
+                    conn.execute(
+                        text(
+                            "INSERT INTO schema_migrations (version, description) VALUES (:v, :d)"
+                        ),
+                        {"v": version, "d": description},
+                    )
+                    conn.commit()
+                    logger.info("schema_migrations: v%d applied", version)
+
+                latest = pending[-1][0]
+                logger.info(
+                    "schema_migrations: applied %d migration(s), now at v%d",
+                    len(pending),
+                    latest,
+                )
+            finally:
+                try:
+                    unlocked = conn.execute(
+                        text("SELECT pg_advisory_unlock(:lock_id)"),
+                        {"lock_id": _MIGRATION_ADVISORY_LOCK_ID},
+                    ).scalar_one()
+                    conn.commit()
+                    if unlocked:
+                        logger.info("schema_migrations: advisory lock released")
+                    else:
+                        logger.warning("schema_migrations: advisory lock was not held on unlock")
+                except Exception as unlock_exc:
+                    logger.warning(
+                        "schema_migrations: unable to release advisory lock cleanly: %s",
+                        unlock_exc,
+                        exc_info=True,
+                    )
+    except Exception as exc:
+        logger.warning(
+            "schema_migrations: startup migrations skipped so the app can continue: %s",
+            exc,
+            exc_info=True,
+        )
