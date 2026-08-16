@@ -565,22 +565,8 @@
       const fd = new FormData();
       fd.append('file', file);
       fd.append('uploaded_by', String(uploadedBy || 'ui-user'));
-      fd.append('compression_mode', 'lossy');
       const claimId = String(claimKey || '').trim();
-      try {
-        return await uploadFormDataWithProgress('/api/v1/claims/' + encodeURIComponent(claimId) + '/documents', fd, onProgress);
-      } catch (err) {
-        const fallbackFd = new FormData();
-        fallbackFd.append('files', file);
-        fallbackFd.append('uploaded_by', String(uploadedBy || 'ui-user'));
-        fallbackFd.append('compression_mode', 'lossy');
-        try {
-          const fallbackResult = await uploadFormDataWithProgress('/api/v1/claims/' + encodeURIComponent(claimId) + '/documents/merged', fallbackFd, onProgress);
-          return fallbackResult && fallbackResult.document ? fallbackResult.document : fallbackResult;
-        } catch (_fallbackErr) {
-          throw err;
-        }
-      }
+      return await uploadFormDataWithProgress('/api/v1/claims/' + encodeURIComponent(claimId) + '/documents', fd, onProgress);
     }
 
     async function runWithConcurrency(items, limit, worker) {
@@ -6232,23 +6218,34 @@
 
       const queueExtractionBtn = document.getElementById('case-queue-extraction');
       if (queueExtractionBtn) {
-        queueExtractionBtn.addEventListener('click', async function() {
-          try {
-            queueExtractionBtn.disabled = true;
-            queueExtractionBtn.textContent = 'Queueing...';
-            const result = await apiFetch('/api/v1/claims/' + encodeURIComponent(claimUuid) + '/process', { method: 'POST' });
-            setMessage('case-detail-msg', 'ok', 'Claim queued for extraction processing! Status: ' + (result.status || 'queued'));
-            queueExtractionBtn.textContent = 'Queued!';
-            setTimeout(function() {
+        console.log('🔍 Claim object:', claim);
+        console.log('🔍 extraction_completed value:', claim && claim.extraction_completed);
+        if (claim && claim.extraction_completed) {
+          queueExtractionBtn.disabled = true;
+          queueExtractionBtn.textContent = 'Already Extracted';
+          queueExtractionBtn.style.opacity = '0.5';
+          queueExtractionBtn.style.cursor = 'not-allowed';
+          console.log('✅ Button DISABLED - extraction completed');
+        } else {
+          console.log('❌ Button ENABLED - extraction not completed or missing flag');
+          queueExtractionBtn.addEventListener('click', async function() {
+            try {
+              queueExtractionBtn.disabled = true;
+              queueExtractionBtn.textContent = 'Queueing...';
+              const result = await apiFetch('/api/v1/claims/' + encodeURIComponent(claimUuid) + '/process', { method: 'POST' });
+              setMessage('case-detail-msg', 'ok', 'Claim queued for extraction processing! Status: ' + (result.status || 'queued'));
+              queueExtractionBtn.textContent = 'Queued!';
+              setTimeout(function() {
+                queueExtractionBtn.textContent = 'Queue for Extraction';
+                queueExtractionBtn.disabled = false;
+              }, 3000);
+            } catch (err) {
+              setMessage('case-detail-msg', 'err', 'Failed to queue claim: ' + (err.message || String(err)));
               queueExtractionBtn.textContent = 'Queue for Extraction';
               queueExtractionBtn.disabled = false;
-            }, 3000);
-          } catch (err) {
-            setMessage('case-detail-msg', 'err', 'Failed to queue claim: ' + (err.message || String(err)));
-            queueExtractionBtn.textContent = 'Queue for Extraction';
-            queueExtractionBtn.disabled = false;
-          }
-        });
+            }
+          });
+        }
       }
 
       const loadedPreferred = await loadSavedReportBySource(preferredReportSource, true, { allowStale: false });
@@ -6978,7 +6975,13 @@
           const fileName = String((file && file.name) || 'file');
           try {
             setModalBusy(true, 'Uploading ' + String(completedCount + 1) + ' of ' + String(list.length) + ': ' + fileName);
-            const result = await uploadSingleDocumentForClaim(claimKey, file, uploadedBy);
+            const result = await uploadSingleDocumentForClaim(claimKey, file, uploadedBy, function(progress) {
+              if (progress && progress.total > 0) {
+                const pct = Math.round((progress.loaded / progress.total) * 100);
+                const progressBar = document.getElementById('upload-after-modal-progress-bar');
+                if (progressBar) progressBar.style.width = pct + '%';
+              }
+            });
             uploadedDocs.push(result);
             uploadedCount += 1;
           } catch (err) {
@@ -9550,7 +9553,7 @@
     async function loadRows(resetPage) {
       if (resetPage) state.page = 1;
       state.search = String(searchInput.value || '').trim();
-      tbody.innerHTML = '<tr><td colspan="6">Loading...</td></tr>';
+      tbody.innerHTML = '<tr><td colspan="8">Loading...</td></tr>';
       setMessage('med-msg', '', '');
 
       const params = new URLSearchParams();
@@ -9812,7 +9815,8 @@ async function renderLegacyMigration() {
       + '<article class="stat-card"><div class="muted">Failed</div><div class="value" id="ai-queue-stat-failed">0</div></article>'
       + '</div>'
       + '<h3>Claims Ready for Queue</h3>'
-      + '<div class="table-wrap claim-status-table-wrap"><table><thead><tr><th>CLAIM ID</th><th>DOCTOR</th><th>ALL FILES</th><th>UPLOADS</th><th>VERIFAI JSON</th><th>QUEUE</th></tr></thead><tbody id="ai-queue-tbody"><tr><td colspan="6">Loading...</td></tr></tbody></table></div>'
+      + '<div style="margin-bottom:12px;"><button type="button" id="ai-queue-select-all" class="btn-soft">Select All</button><button type="button" id="ai-queue-queue-selected" class="btn-soft" style="background:#10b981;color:white;" disabled>Queue Selected</button><span id="ai-queue-selected-count" style="margin-left:12px;color:#666;"></span></div>'
+      + '<div class="table-wrap claim-status-table-wrap"><table><thead><tr><th><input type="checkbox" id="ai-queue-select-all-checkbox" style="width:18px;height:18px;cursor:pointer;"></th><th>CLAIM ID</th><th>DOCTOR</th><th>DOCUMENTS</th><th>EXTRACTED</th><th>STRUCTURED</th><th>REPORT READY</th><th>ACTION</th></tr></thead><tbody id="ai-queue-tbody"><tr><td colspan="8">Loading...</td></tr></tbody></table></div>'
       + '<div class="claim-pagination">'
       + '<div class="claim-pagination__left"><label for="ai-queue-page-size">Rows</label><select id="ai-queue-page-size"><option value="10" selected>10</option><option value="20">20</option><option value="50">50</option></select></div>'
       + '<div class="claim-pagination__info" id="ai-queue-page-info">Showing 0-0 of 0</div>'
@@ -9920,7 +9924,7 @@ async function renderLegacyMigration() {
       state.searchClaim = String(searchEl.value || '').trim();
       state.doctorFilter = String(doctorEl.value || '').trim();
       state.statusFilter = String(statusEl.value || 'all').trim();
-      tbody.innerHTML = '<tr><td colspan="6">Loading...</td></tr>';
+      tbody.innerHTML = '<tr><td colspan="8">Loading...</td></tr>';
       setMessage('ai-queue-msg', '', '');
 
       const params = new URLSearchParams();
@@ -9941,24 +9945,40 @@ async function renderLegacyMigration() {
           const claimUuid = String(item.id || '').trim();
           const claimId = String(item.external_claim_id || '-').trim();
           const docs = Number(item.documents || 0);
-          const sourceFiles = Number(item.source_files || docs || 0);
-          const verifaiState = String(item.verifai_json_state || (item.verifai_queued ? 'waiting' : 'not_sent')).trim().toLowerCase();
-          const verifaiLabel = verifaiState === 'received' ? 'Received' : (verifaiState === 'waiting' ? 'Waiting' : 'Not Sent');
+          const verifaiQueued = !!item.verifai_queued;
+          const verifaiJsonState = String(item.verifai_json_state || '').toLowerCase().trim();
+
+          // Determine pipeline status
+          const extractionStat = String(item.extraction_status || 'pending').toLowerCase().trim();
+          const extractedStatus = extractionStat === 'succeeded' ? '✅ Extracted' : (extractionStat === 'partial' ? '⏳ Partial' : '❌ Pending');
+          const structuredStatus = (item.structured_count > 0) ? '✅ Structured' : '❌ Pending';
+          const reportStatus = (item.report_count > 0) ? '✅ Report Ready' : '❌ Pending';
+
           const canQueue = docs > 0;
+          const extractionStarted = extractionStat !== 'pending';
+          const actionButtons = canQueue
+            ? (verifaiQueued || extractionStarted
+              ? '<button type="button" class="btn-soft" data-ai-queue-claim="' + escapeHtml(claimUuid) + '" disabled style="opacity:0.5;cursor:not-allowed;">Queued</button><button type="button" class="btn-soft" data-ai-requeue-claim="' + escapeHtml(claimUuid) + '" style="background:#ff9800;color:white;margin-left:4px;">Requeue</button>'
+              : '<button type="button" class="btn-soft" data-ai-queue-claim="' + escapeHtml(claimUuid) + '">Queue</button>')
+            : '<button type="button" class="btn-soft" disabled>No Docs</button>';
           return '<tr>'
+            + '<td><input type="checkbox" class="ai-queue-select-checkbox" data-claim-uuid="' + escapeHtml(claimUuid) + '" style="width:18px;height:18px;cursor:pointer;"></td>'
             + '<td><code>' + escapeHtml(claimId) + '</code></td>'
             + '<td>' + escapeHtml(formatAssignedDoctor(item.assigned_doctor_id || '')) + '</td>'
-            + '<td>' + escapeHtml(String(docs)) + '</td>'
-            + '<td>' + escapeHtml(String(sourceFiles)) + '</td>'
-            + '<td>' + statusChip(verifaiLabel) + (item.verifai_status ? '<div class="muted" style="margin-top:4px;">' + escapeHtml(String(item.verifai_status || '') + (item.verifai_stage ? (' / ' + String(item.verifai_stage || '')) : '')) + '</div>' : '') + '</td>'
-            + '<td><button type="button" class="btn-soft" data-ai-queue-claim="' + escapeHtml(claimUuid) + '"' + (canQueue ? '' : ' disabled') + '>' + escapeHtml(canQueue ? 'Queue Claim' : 'No Documents') + '</button></td>'
+            + '<td>' + escapeHtml(String(docs)) + ' doc(s)</td>'
+            + '<td><span style="font-size:12px;">' + extractedStatus + '</span></td>'
+            + '<td><span style="font-size:12px;">' + structuredStatus + '</span></td>'
+            + '<td><span style="font-size:12px;">' + reportStatus + '</span></td>'
+            + '<td style="min-width:240px;">' + actionButtons + '</td>'
             + '</tr>';
         }).join('');
-        tbody.innerHTML = rows || '<tr><td colspan="6">No claims found for this queue.</td></tr>';
+        tbody.innerHTML = rows || '<tr><td colspan="8">No claims found for this queue.</td></tr>';
+
+        // Individual queue buttons
         tbody.querySelectorAll('button[data-ai-queue-claim]').forEach(function (btn) {
           btn.addEventListener('click', async function () {
             const claimUuid = String(this.getAttribute('data-ai-queue-claim') || '').trim();
-            if (!claimUuid) return;
+            if (!claimUuid || this.disabled) return;
             const original = this.textContent;
             this.disabled = true;
             this.textContent = 'Queueing...';
@@ -9975,14 +9995,110 @@ async function renderLegacyMigration() {
             } catch (err) {
               setMessage('ai-queue-msg', 'err', err && err.message ? err.message : 'Queue claim failed.');
               this.disabled = false;
-              this.textContent = original || 'Queue Claim';
+              this.textContent = original || 'Queue';
             }
           });
         });
+
+        // Requeue buttons
+        tbody.querySelectorAll('button[data-ai-requeue-claim]').forEach(function (btn) {
+          btn.addEventListener('click', async function () {
+            const claimUuid = String(this.getAttribute('data-ai-requeue-claim') || '').trim();
+            if (!claimUuid) return;
+            const original = this.textContent;
+            this.disabled = true;
+            this.textContent = 'Requeuing...';
+            setMessage('ai-queue-msg', '', 'Requeuing claim ' + claimUuid + ' (will overwrite extraction, structure, and report)...');
+            try {
+              await apiFetch('/api/v1/claims/' + encodeURIComponent(claimUuid) + '/process', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ force_refresh: true })
+              });
+              setMessage('ai-queue-msg', 'ok', 'Requeued claim ' + claimUuid + '. Previous extraction, structure, and report will be overwritten.');
+              await loadJobs(true);
+              await loadQueueClaims(false);
+            } catch (err) {
+              setMessage('ai-queue-msg', 'err', err && err.message ? err.message : 'Requeue claim failed.');
+              this.disabled = false;
+              this.textContent = original || 'Requeue';
+            }
+          });
+        });
+
+        // Checkbox event listeners for bulk selection
+        const selectAllCheckbox = document.getElementById('ai-queue-select-all-checkbox');
+        const selectCheckboxes = tbody.querySelectorAll('.ai-queue-select-checkbox');
+        const selectAllBtn = document.getElementById('ai-queue-select-all');
+        const queueSelectedBtn = document.getElementById('ai-queue-queue-selected');
+        const selectedCountSpan = document.getElementById('ai-queue-selected-count');
+
+        function updateBulkActionState() {
+          const selectedCount = Array.from(selectCheckboxes).filter(function (cb) { return cb.checked; }).length;
+          if (selectedCountSpan) selectedCountSpan.textContent = selectedCount > 0 ? 'Selected: ' + selectedCount : '';
+          if (queueSelectedBtn) queueSelectedBtn.disabled = selectedCount === 0;
+        }
+
+        selectCheckboxes.forEach(function (checkbox) {
+          checkbox.addEventListener('change', updateBulkActionState);
+        });
+
+        if (selectAllCheckbox) {
+          selectAllCheckbox.addEventListener('change', function () {
+            selectCheckboxes.forEach(function (cb) {
+              cb.checked = selectAllCheckbox.checked;
+            });
+            updateBulkActionState();
+          });
+        }
+
+        if (selectAllBtn) {
+          selectAllBtn.addEventListener('click', function () {
+            selectCheckboxes.forEach(function (cb) { cb.checked = true; });
+            if (selectAllCheckbox) selectAllCheckbox.checked = true;
+            updateBulkActionState();
+          });
+        }
+
+        if (queueSelectedBtn) {
+          queueSelectedBtn.addEventListener('click', async function () {
+            const selectedClaims = Array.from(selectCheckboxes).filter(function (cb) { return cb.checked; }).map(function (cb) { return cb.getAttribute('data-claim-uuid'); });
+            if (selectedClaims.length === 0) {
+              setMessage('ai-queue-msg', 'err', 'No claims selected.');
+              return;
+            }
+            this.disabled = true;
+            const original = this.textContent;
+            this.textContent = 'Queueing...';
+            setMessage('ai-queue-msg', '', 'Queueing ' + selectedClaims.length + ' claim(s)...');
+            let successCount = 0;
+            let errorCount = 0;
+            for (const claimUuid of selectedClaims) {
+              try {
+                await apiFetch('/api/v1/claims/' + encodeURIComponent(claimUuid) + '/process', {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({})
+                });
+                successCount += 1;
+              } catch (_err) {
+                errorCount += 1;
+              }
+            }
+            this.disabled = false;
+            this.textContent = original;
+            const msg = 'Queued ' + successCount + ' claim(s)' + (errorCount > 0 ? ', ' + errorCount + ' failed' : '') + '.';
+            setMessage('ai-queue-msg', errorCount === 0 ? 'ok' : 'warn', msg);
+            await loadJobs(true);
+            await loadQueueClaims(false);
+          });
+        }
+
+        updateBulkActionState();
         updatePaginationUi();
       } catch (err) {
         state.total = 0;
-        tbody.innerHTML = '<tr><td colspan="6">Failed to load AI queue.</td></tr>';
+        tbody.innerHTML = '<tr><td colspan="8">Failed to load AI queue.</td></tr>';
         updatePaginationUi();
         setMessage('ai-queue-msg', 'err', err && err.message ? err.message : 'Failed to load AI queue.');
       }

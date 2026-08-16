@@ -4,7 +4,14 @@ import redis
 import psycopg
 import logging
 from datetime import datetime
+from dotenv import load_dotenv
 import google.generativeai as genai
+
+# Load .env file from parent directory
+import sys
+from pathlib import Path
+env_path = Path(__file__).parent.parent / '.env'
+load_dotenv(env_path)
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -13,7 +20,7 @@ DB_DSN = os.getenv('DATABASE_URL', 'postgresql://verifai:yYv5Ny7outZG7XKrgEJ8JUx
 REDIS_HOST = os.getenv('REDIS_HOST', '127.0.0.1')
 REDIS_PORT = int(os.getenv('REDIS_PORT', 6379))
 GEMINI_API_KEY = os.getenv('GEMINI_API_KEY')
-GEMINI_MODEL = os.getenv('GEMINI_FLASH_MODEL', 'gemini-2.5-flash')
+GEMINI_MODEL = os.getenv('GEMINI_FLASH_MODEL', 'gemini-3-flash-preview')
 
 if not GEMINI_API_KEY:
     raise ValueError('GEMINI_API_KEY environment variable not set')
@@ -119,6 +126,35 @@ medical documents. Doctor review is required before final approval.
 {'='*70}
         """.strip()
 
+        # Convert to HTML for display
+        html_report = f"""<h1 class="title">MEDICAL CLAIM REPORT - AUTO GENERATED</h1>
+<div class="meta">Generated: {datetime.now().strftime('%m/%d/%Y, %I:%M:%S %p')} | Report Type: AI-Generated ({GEMINI_MODEL})</div>
+<div class="content">
+<h2>FACILITY & PROVIDER INFORMATION</h2>
+<table style="width: 100%; border-collapse: collapse;">
+<tr><td style="padding: 5px;"><b>Hospital:</b></td><td style="padding: 5px;">{structured_data['hospital_name']}</td></tr>
+<tr><td style="padding: 5px;"><b>Treating Doctor:</b></td><td style="padding: 5px;">{structured_data['treating_doctor']}</td></tr>
+</table>
+
+<h2>CLINICAL DETAILS</h2>
+<table style="width: 100%; border-collapse: collapse;">
+<tr><td style="padding: 5px;"><b>Diagnosis:</b></td><td style="padding: 5px;">{structured_data['diagnosis']}</td></tr>
+<tr><td style="padding: 5px;"><b>Complaints:</b></td><td style="padding: 5px;">{structured_data['complaints']}</td></tr>
+<tr><td style="padding: 5px;"><b>Medications:</b></td><td style="padding: 5px;">{structured_data['medicine_used']}</td></tr>
+</table>
+
+<h2>CLAIM DETAILS</h2>
+<table style="width: 100%; border-collapse: collapse;">
+<tr><td style="padding: 5px;"><b>Claim Amount:</b></td><td style="padding: 5px;">₹{structured_data['claim_amount']}</td></tr>
+</table>
+
+<h2>CONCLUSION</h2>
+<p>{structured_data['conclusion']}</p>
+
+<hr style="margin-top: 20px;">
+<p style="font-size: 12px; color: #666;">Note: This report was auto-generated using AI analysis of OCR-extracted medical documents. Doctor review is required before final approval.</p>
+</div>"""
+
         # Insert report into database
         cur.execute('''
             INSERT INTO medical_reports (
@@ -143,6 +179,24 @@ medical documents. Doctor review is required before final approval.
             text_report,
             'generated'
         ))
+
+        # Also save to report_versions so it shows as latest report in the system
+        try:
+            cur.execute('''
+                INSERT INTO report_versions (
+                    claim_id, version_no, report_markdown, report_status, created_by, created_at
+                )
+                VALUES (
+                    %s,
+                    COALESCE((SELECT MAX(version_no) FROM report_versions WHERE claim_id = %s), 0) + 1,
+                    %s,
+                    'completed',
+                    'system-auto-generated',
+                    NOW()
+                )
+            ''', (claim_id, claim_id, html_report))
+        except Exception as e:
+            logger.warning(f'Could not save to report_versions: {str(e)}')
 
         logger.info(f'📄 Auto-report generated for claim {claim_id}')
         return True
@@ -169,25 +223,31 @@ def run_stage2_loop():
                 conn = psycopg.connect(DB_DSN)
                 cur = conn.cursor()
 
-                # Get OCR text from Stage 1
+                # Get OCR text from ALL documents in Stage 1 and combine
                 cur.execute('''
-                    SELECT de.raw_response
+                    SELECT de.raw_response, cd.file_name
                     FROM document_extractions de
                     JOIN claim_documents cd ON de.document_id = cd.id
                     WHERE cd.claim_id = %s
-                    ORDER BY de.created_at DESC
-                    LIMIT 1
+                    ORDER BY de.created_at ASC
                 ''', (claim_id,))
 
-                ocr_row = cur.fetchone()
-                if not ocr_row or not ocr_row[0]:
+                ocr_rows = cur.fetchall()
+                if not ocr_rows:
                     logger.warning(f'No OCR text found for claim {claim_id}')
                     cur.close()
                     conn.close()
                     continue
 
-                ocr_text = ocr_row[0]
-                logger.info(f'Retrieved {len(ocr_text)} chars of OCR text for claim {claim_id}')
+                # Combine OCR from all documents
+                combined_texts = []
+                for row in ocr_rows:
+                    ocr_data, filename = row
+                    if ocr_data:
+                        combined_texts.append(f'--- Document: {filename} ---\n{ocr_data}')
+
+                ocr_text = '\n\n'.join(combined_texts)
+                logger.info(f'Combined OCR from {len(ocr_rows)} documents: {len(ocr_text)} chars for claim {claim_id}')
 
                 # Extract structured data with Gemini
                 structured_json = extract_structured_data_gemini(ocr_text, claim_id)

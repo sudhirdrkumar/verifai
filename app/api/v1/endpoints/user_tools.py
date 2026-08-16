@@ -1594,6 +1594,41 @@ def get_completed_report_latest_html(
     ):
         raise HTTPException(status_code=403, detail="doctor can access only assigned claims")
 
+    # Try to get auto-generated report from report_versions first
+    try:
+        auto_generated_row = db.execute(
+            text("""
+                SELECT rv.version_no, rv.report_markdown, rv.created_at
+                FROM report_versions rv
+                WHERE rv.claim_id = :claim_id
+                  AND rv.created_by = 'system-auto-generated'
+                ORDER BY rv.version_no DESC
+                LIMIT 1
+            """),
+            {"claim_id": str(claim_id)},
+        ).first()
+
+        logger.info(f"Auto-report query result: {bool(auto_generated_row)}, markdown_len: {len(auto_generated_row[1] or '') if auto_generated_row else 0}")
+
+        if auto_generated_row and auto_generated_row[1]:
+            report_markdown = auto_generated_row[1]
+            logger.info(f"Returning auto-generated report for claim {claim_id}")
+            return CompletedReportLatestHtmlResponse(
+                claim_id=str(claim_id),
+                external_claim_id="",
+                version_no=int(auto_generated_row[0] or 0),
+                report_html=report_markdown,
+                report_status="completed",
+                report_source="system",
+                created_by="system-auto-generated",
+                created_at=str(auto_generated_row[2] or ""),
+            )
+        else:
+            logger.warning(f"Auto-report query returned no result or empty markdown for claim {claim_id}")
+    except Exception as e:
+        logger.error(f"Error fetching auto-report for claim {claim_id}: {e}", exc_info=True)
+
+    # Fall back to old VerifAI reports
     system_report_expr = _system_report_sql("rv.created_by")
     source_where = ""
     if normalized_source == "doctor":
@@ -1627,6 +1662,7 @@ def get_completed_report_latest_html(
 
     report_html = _normalize_report_title_html(row.get("report_html")) if row is not None else ""
     if row is None or not report_html.strip():
+        # Fall back to decision_results (old system)
         decision_system_report_expr = _system_report_sql("dr.generated_by")
         decision_source_where = ""
         if normalized_source == "doctor":
@@ -2904,7 +2940,8 @@ def claim_document_status(
                 or _tag_at(tags_value, 4)
             )
             external_claim_id = str(r.get("external_claim_id") or "")
-            handwriting_payload = handwriting_by_claim.get(str(r.get("id") or ""), empty_handwriting)
+            claim_id_str = str(r["id"])
+            handwriting_payload = handwriting_by_claim.get(claim_id_str, empty_handwriting)
             handwriting_payload = _apply_manual_handwriting_override(external_claim_id, handwriting_payload)
             verifai_case_id = str(r.get("verifai_case_id") or "")
             verifai_status = str(r.get("verifai_status") or "")
@@ -2914,9 +2951,37 @@ def claim_document_status(
                 verifai_status,
                 verifai_stage,
             )
+            # Check if claim has queued extraction jobs
+            has_queued_extraction = bool(
+                db.execute(
+                    text("SELECT 1 FROM extraction_jobs WHERE claim_id = :cid AND status IN ('queued', 'processing') LIMIT 1"),
+                    {"cid": claim_id_str}
+                ).fetchone()
+            )
+            verifai_queued_status = bool(verifai_case_id.strip()) or has_queued_extraction
+
+            # Get extraction job counts
+            extraction_counts = db.execute(
+                text("SELECT status, COUNT(*) FROM extraction_jobs WHERE claim_id = :cid GROUP BY status"),
+                {"cid": claim_id_str}
+            ).fetchall()
+            extraction_succeeded = sum(count for status, count in extraction_counts if status == 'succeeded')
+            extraction_total = int(r.get("documents") or 0)
+            extraction_status = 'succeeded' if extraction_succeeded == extraction_total and extraction_total > 0 else ('partial' if extraction_succeeded > 0 else 'pending')
+
+            # Get structured and report counts
+            structured_count = db.execute(
+                text("SELECT COUNT(*) FROM claim_structured_data WHERE claim_id = :cid"),
+                {"cid": claim_id_str}
+            ).fetchone()[0] or 0
+            report_count = db.execute(
+                text("SELECT COUNT(*) FROM medical_reports WHERE claim_id = :cid"),
+                {"cid": claim_id_str}
+            ).fetchone()[0] or 0
+
             items.append(
                 {
-                    "id": str(r["id"]),
+                    "id": claim_id_str,
                     "external_claim_id": external_claim_id,
                     "assigned_doctor_id": str(r.get("assigned_doctor_id") or ""),
                     "status": str(r.get("status") or ""),
@@ -2936,9 +3001,14 @@ def claim_document_status(
                     "verifai_status": verifai_status,
                     "verifai_stage": verifai_stage,
                     "verifai_queued_at": str(r.get("verifai_queued_at") or ""),
-                    "verifai_queued": bool(verifai_case_id.strip()),
+                    "verifai_queued": verifai_queued_status,
                     "verifai_json_received": bool(verifai_json_received),
                     "verifai_json_state": verifai_json_state,
+                    "extraction_status": extraction_status,
+                    "extraction_succeeded": extraction_succeeded,
+                    "extraction_total": extraction_total,
+                    "structured_count": structured_count,
+                    "report_count": report_count,
                     "claim_type": claim_type,
                     "treatment_type": treatment_type,
                     "handwriting_analysis": handwriting_payload,

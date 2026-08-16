@@ -7,7 +7,7 @@ upstream verifai_backend {
 
 server {
     server_name verifai.in;
-    client_max_body_size 200M;
+    client_max_body_size 1G;
 
     location / {
         proxy_pass http://verifai_backend;

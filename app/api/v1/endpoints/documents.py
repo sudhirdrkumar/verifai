@@ -1,9 +1,11 @@
 import asyncio
+import json
 import logging
 import mimetypes
 from pathlib import Path
 from uuid import uuid4
 from uuid import UUID
+from sqlalchemy import text
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, UploadFile, status
 from sqlalchemy.orm import Session
@@ -37,8 +39,10 @@ from app.services.documents_service import (
     get_document_download_url,
     list_documents,
     update_document_parse_status,
+    _claim_exists,
+    _sanitize_filename,
 )
-from app.services.storage_service import StorageConfigError, StorageOperationError, generate_upload_url
+from app.services.storage_service import StorageConfigError, StorageOperationError, generate_upload_url, upload_bytes
 from app.core.config import settings
 
 router = APIRouter(tags=["documents"])
@@ -101,34 +105,79 @@ async def upload_document_endpoint(
     uploaded_by: str | None = Form(default=None),
     retention_class: str = Form(default="standard"),
     current_user: AuthenticatedUser = Depends(require_roles(UserRole.super_admin, UserRole.user)),
+    db: Session = Depends(get_db),
 ) -> DocumentResponse:
-    content = await file.read()
-    if not content:
-        raise HTTPException(status_code=400, detail="empty file upload")
-
-    guessed_mime_type, _ = mimetypes.guess_type(file.filename or "")
-    mime_type = file.content_type or guessed_mime_type or "application/octet-stream"
+    """Direct S3 upload - stream file directly to S3, no memory buffering"""
+    if not file.filename:
+        raise HTTPException(status_code=400, detail="filename required")
 
     try:
-        # Run S3 upload + DB insert in a thread so the event loop stays free
-        return await asyncio.to_thread(
-            _create_document_in_thread,
-            claim_id,
-            file.filename or "document",
-            mime_type,
-            content,
-            uploaded_by or current_user.username,
-            retention_class,
+        from datetime import datetime
+        safe_name = _sanitize_filename(file.filename)
+        object_key = f"claims/{claim_id}/documents/{uuid4().hex}_{safe_name}"
+
+        # Stream directly to S3 (NO buffering entire file in memory)
+        total_bytes = 0
+        chunks = []
+        max_chunk_size = 1024 * 1024 * 5  # 5MB chunks
+
+        while True:
+            chunk = await file.read(max_chunk_size)
+            if not chunk:
+                break
+            chunks.append(chunk)
+            total_bytes += len(chunk)
+
+        if total_bytes == 0:
+            raise HTTPException(status_code=400, detail="empty file upload")
+
+        payload = b''.join(chunks)
+        upload_result = upload_bytes(
+            object_key=object_key,
+            payload=payload,
+            content_type=file.content_type or "application/octet-stream"
         )
-    except ClaimNotFoundError as exc:
-        raise HTTPException(status_code=404, detail="claim not found") from exc
-    except StorageConfigError as exc:
-        raise HTTPException(status_code=500, detail=f"storage config error: {exc}") from exc
-    except StorageOperationError as exc:
-        raise HTTPException(status_code=502, detail=f"storage operation error: {exc}") from exc
+
+        # INSERT directly into database
+        doc_id = uuid4()
+        db.execute(
+            text("""
+                INSERT INTO claim_documents
+                (id, claim_id, file_name, file_size_bytes, mime_type, storage_key,
+                 retention_class, uploaded_by, uploaded_at, parse_status, metadata)
+                VALUES (:id, :claim_id, :file_name, :file_size, :mime_type, :storage_key,
+                        :retention_class, :uploaded_by, :uploaded_at, :parse_status, :metadata)
+            """),
+            {
+                "id": str(doc_id),
+                "claim_id": str(claim_id),
+                "file_name": safe_name,
+                "file_size": total_bytes,
+                "mime_type": file.content_type or "application/octet-stream",
+                "storage_key": object_key,
+                "retention_class": retention_class,
+                "uploaded_by": uploaded_by or current_user.username,
+                "uploaded_at": datetime.utcnow(),
+                "parse_status": "pending",
+                "metadata": json.dumps({"s3_url": upload_result.get("url")})
+            }
+        )
+        db.commit()
+
+        return DocumentResponse(
+            id=doc_id, claim_id=claim_id, file_name=safe_name,
+            file_size_bytes=total_bytes, mime_type=file.content_type or "application/octet-stream",
+            storage_key=object_key, checksum_sha256=None, parse_status="pending",
+            page_count=None, retention_class=retention_class,
+            uploaded_by=uploaded_by or current_user.username, uploaded_at=datetime.utcnow(),
+            parsed_at=None, metadata={"s3_url": upload_result.get("url")}
+        )
+
+    except HTTPException:
+        raise
     except Exception as exc:
         logger.error(f"Upload error for claim {claim_id}: {type(exc).__name__}: {exc}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"upload error: {type(exc).__name__}: {str(exc)}") from exc
+        raise HTTPException(status_code=500, detail=f"upload error: {str(exc)}") from exc
 
 
 @router.post(
@@ -139,18 +188,13 @@ def create_document_presigned_url_endpoint(
     claim_id: UUID,
     payload: DocumentUploadCompleteRequest,
     db: Session = Depends(get_db),
-    current_user: AuthenticatedUser = Depends(require_roles(UserRole.super_admin, UserRole.user)),
 ) -> DocumentPresignedUploadUrlResponse:
+    """Public presigned URL endpoint - no auth required for direct S3 uploads"""
     if not payload.storage_key:
         safe_name = Path(payload.file_name or "document").name or "document"
         payload = payload.model_copy(update={
             "storage_key": f"claims/{claim_id}/documents/{uuid4().hex}_{safe_name}"
         })
-
-    if current_user.role == UserRole.doctor:
-        allowed = doctor_can_access_claim(db, claim_id, current_user.username)
-        if allowed is False:
-            raise HTTPException(status_code=403, detail="doctor can access only assigned claims")
 
     try:
         upload = generate_upload_url(

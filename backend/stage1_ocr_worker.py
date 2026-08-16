@@ -9,6 +9,10 @@ import base64
 import logging
 import requests
 from datetime import datetime
+from dotenv import load_dotenv
+
+# Load .env file
+load_dotenv()
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -18,12 +22,21 @@ AWS_REGION = os.getenv('AWS_REGION', 'ap-south-1')
 REDIS_HOST = os.getenv('REDIS_HOST', '127.0.0.1')
 REDIS_PORT = int(os.getenv('REDIS_PORT', 6379))
 S3_BUCKET = os.getenv('S3_BUCKET', 'rightworks-docs')
+S3_ACCESS_KEY = os.getenv('S3_ACCESS_KEY')
+S3_SECRET_KEY = os.getenv('S3_SECRET_KEY')
 OPENAI_API_KEY = os.getenv('OPENAI_API_KEY')
 MAX_BATCH_SIZE = 7 * 1024 * 1024  # 7MB
 
 r = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, decode_responses=True, socket_keepalive=True)
+
+# Create S3 client with explicit credentials if available
+s3_kwargs = {'region_name': AWS_REGION}
+if S3_ACCESS_KEY and S3_SECRET_KEY:
+    s3_kwargs['aws_access_key_id'] = S3_ACCESS_KEY
+    s3_kwargs['aws_secret_access_key'] = S3_SECRET_KEY
+s3 = boto3.client('s3', **s3_kwargs)
+
 textract = boto3.client('textract', region_name=AWS_REGION)
-s3 = boto3.client('s3', region_name=AWS_REGION)
 
 def clean_and_compress_ocr(raw_text: str) -> str:
     if not raw_text:
@@ -35,18 +48,25 @@ def clean_and_compress_ocr(raw_text: str) -> str:
     cleaned = re.sub(r'[ \t]{2,}', ' ', cleaned)
     return cleaned.strip()
 
-def get_file_size_s3(bucket, key):
-    """Get file size from S3"""
-    try:
-        response = s3.head_object(Bucket=bucket, Key=key)
-        return response['ContentLength']
-    except Exception as e:
-        logger.error(f'Error getting S3 object size: {e}')
-        return None
+def get_file_size_s3(bucket, key, retries=3):
+    """Get file size from S3 with retry logic"""
+    for attempt in range(retries):
+        try:
+            response = s3.head_object(Bucket=bucket, Key=key)
+            return response['ContentLength']
+        except Exception as e:
+            if attempt < retries - 1:
+                wait_time = 2 ** attempt  # Exponential backoff: 1s, 2s, 4s
+                logger.warning(f'S3 access failed (attempt {attempt+1}/{retries}), retrying in {wait_time}s: {e}')
+                time.sleep(wait_time)
+            else:
+                logger.error(f'S3 access failed after {retries} attempts: {e}')
+                return None
+    return None
 
 def extract_with_openai_vision(file_data_list):
     """
-    Send files to OpenAI Vision for text extraction
+    Send files to OpenAI Vision for text extraction with 7MB batching
     file_data_list: list of (filename, base64_data, mime_type)
     """
     if not OPENAI_API_KEY:
@@ -54,56 +74,90 @@ def extract_with_openai_vision(file_data_list):
         return None
 
     try:
-        # Prepare content for OpenAI
-        content = [
-            {"type": "text", "text": f"Extract ALL text from these medical documents. Return the complete extracted text only."}
-        ]
+        # Batch files by 7MB
+        batches = []
+        current_batch = []
+        current_size = 0
 
         for filename, data_base64, mime_type in file_data_list:
-            if mime_type == 'application/pdf':
-                # For PDFs, use the file reference format
-                content.append({
-                    "type": "document",
-                    "source": {
-                        "type": "base64",
-                        "media_type": "application/pdf",
-                        "data": data_base64
-                    }
-                })
-            logger.info(f'Added {filename} to OpenAI extraction batch')
+            # Calculate size of base64 data
+            file_size = len(data_base64.encode('utf-8'))
 
-        # Call OpenAI GPT-4 Omni
-        headers = {
-            "Authorization": f"Bearer {OPENAI_API_KEY}",
-            "Content-Type": "application/json"
-        }
+            # If file is larger than 7MB, send alone
+            if file_size > MAX_BATCH_SIZE:
+                if current_batch:
+                    batches.append(current_batch)
+                    current_batch = []
+                    current_size = 0
+                batches.append([(filename, data_base64, mime_type)])
+                logger.info(f'Large file {filename} ({file_size / 1024 / 1024:.1f}MB) will be sent alone')
+            # If adding to current batch would exceed 7MB, start new batch
+            elif current_size + file_size > MAX_BATCH_SIZE:
+                batches.append(current_batch)
+                current_batch = [(filename, data_base64, mime_type)]
+                current_size = file_size
+            # Add to current batch
+            else:
+                current_batch.append((filename, data_base64, mime_type))
+                current_size += file_size
 
-        payload = {
-            "model": "gpt-4o",
-            "messages": [
-                {
-                    "role": "user",
-                    "content": content
-                }
-            ],
-            "max_tokens": 4096
-        }
+        # Add remaining batch
+        if current_batch:
+            batches.append(current_batch)
 
-        response = requests.post(
-            "https://api.openai.com/v1/chat/completions",
-            headers=headers,
-            json=payload,
-            timeout=60
-        )
+        logger.info(f'Split {len(file_data_list)} files into {len(batches)} batches')
 
-        if response.status_code == 200:
-            result = response.json()
-            extracted_text = result['choices'][0]['message']['content']
-            logger.info(f'✅ OpenAI extraction successful: {len(extracted_text)} chars')
-            return extracted_text
-        else:
-            logger.error(f'OpenAI API error: {response.status_code} - {response.text}')
-            return None
+        # Process each batch
+        all_results = []
+        for batch_num, batch in enumerate(batches, 1):
+            logger.info(f'Processing batch {batch_num}/{len(batches)} ({sum(len(f[1].encode("utf-8")) for f in batch) / 1024 / 1024:.1f}MB)')
+
+            content = [
+                {"type": "text", "text": "Extract ALL text from these medical documents. Return the complete extracted text only."}
+            ]
+
+            for filename, data_base64, mime_type in batch:
+                if mime_type == 'application/pdf':
+                    content.append({
+                        "type": "document",
+                        "source": {
+                            "type": "base64",
+                            "media_type": "application/pdf",
+                            "data": data_base64
+                        }
+                    })
+                logger.info(f'  Added {filename} to batch')
+
+            headers = {
+                "Authorization": f"Bearer {OPENAI_API_KEY}",
+                "Content-Type": "application/json"
+            }
+
+            payload = {
+                "model": "gpt-4o",
+                "messages": [{"role": "user", "content": content}],
+                "max_tokens": 4096
+            }
+
+            response = requests.post(
+                "https://api.openai.com/v1/chat/completions",
+                headers=headers,
+                json=payload,
+                timeout=120
+            )
+
+            if response.status_code == 200:
+                result = response.json()
+                extracted_text = result['choices'][0]['message']['content']
+                logger.info(f'✅ Batch {batch_num} extraction successful: {len(extracted_text)} chars')
+                all_results.append(extracted_text)
+            else:
+                logger.error(f'OpenAI API error: {response.status_code} - {response.text}')
+                return None
+
+        # Combine all batch results
+        final_text = '\n'.join(all_results) if all_results else None
+        return final_text
 
     except Exception as e:
         logger.error(f'OpenAI extraction failed: {e}')

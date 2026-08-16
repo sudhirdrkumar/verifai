@@ -1,4 +1,5 @@
 ﻿import json
+import logging
 import re
 from uuid import UUID
 from html import unescape
@@ -8,6 +9,8 @@ import httpx
 import redis
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
+
+logger = logging.getLogger(__name__)
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
@@ -1261,7 +1264,7 @@ def get_claim_endpoint(
     claim_id: UUID,
     db: Session = Depends(get_db),
     current_user: AuthenticatedUser = Depends(require_roles(UserRole.super_admin, UserRole.user, UserRole.doctor, UserRole.auditor)),
-) -> ClaimResponse:
+):
     try:
         claim = get_claim(db, claim_id)
     except ClaimNotFoundError as exc:
@@ -1270,7 +1273,14 @@ def get_claim_endpoint(
     if current_user.role == UserRole.doctor and not doctor_matches_assignment(claim.assigned_doctor_id, current_user.username):
         raise HTTPException(status_code=403, detail="doctor can access only assigned claims")
 
-    return claim
+    # Add extraction status to response
+    cur = db.execute(text('SELECT status FROM extraction_jobs WHERE claim_id = :claim_id ORDER BY queued_at DESC LIMIT 1'), {"claim_id": str(claim_id)})
+    job = cur.fetchone()
+    extraction_completed = job and job[0] == 'succeeded'
+
+    result = claim.model_dump()
+    result['extraction_completed'] = extraction_completed
+    return result
 
 
 @router.patch("/{claim_id}/status", response_model=ClaimResponse)
@@ -1810,9 +1820,6 @@ def process_claim_endpoint(
     db: Session = Depends(get_db),
     current_user: AuthenticatedUser = Depends(require_roles(UserRole.super_admin, UserRole.user, UserRole.doctor, UserRole.auditor)),
 ) -> dict:
-    import logging
-    logger = logging.getLogger(__name__)
-
     try:
         existing = get_claim(db, claim_id)
     except ClaimNotFoundError as exc:
@@ -1822,47 +1829,62 @@ def process_claim_endpoint(
         raise HTTPException(status_code=403, detail="doctor can queue only assigned claims")
 
     from sqlalchemy import text
-    from app.services.extraction_queue_service import extraction_queue_service
-    from app.schemas.extraction import ExtractionProvider
+    from uuid import uuid4
+    from datetime import datetime
+    import json
+    import redis
+    import os
 
     try:
+        # Get documents with storage_key
         documents = db.execute(
-            text("SELECT id FROM claim_documents WHERE claim_id = :claim_id"),
+            text("SELECT id, storage_key FROM claim_documents WHERE claim_id = :claim_id"),
             {"claim_id": str(claim_id)}
         ).fetchall()
-
-        logger.info(f"Processing claim {claim_id}: found {len(documents)} documents")
 
         if not documents:
             raise HTTPException(status_code=404, detail="no documents found for claim")
 
+        # Create extraction jobs directly
+        r = redis.Redis(host=os.getenv('REDIS_HOST', '127.0.0.1'), port=int(os.getenv('REDIS_PORT', 6379)), decode_responses=True)
         queued_jobs = []
-        for (doc_id,) in documents:
-            try:
-                doc_uuid = UUID(str(doc_id)) if not isinstance(doc_id, UUID) else doc_id
-            except Exception as uuid_err:
-                logger.error(f"Failed to convert doc_id to UUID: {doc_id}, error: {uuid_err}")
-                continue
 
-            existing_job = db.execute(
-                text("SELECT id FROM extraction_jobs WHERE document_id = :doc_id AND status IN ('queued', 'processing')"),
-                {"doc_id": str(doc_uuid)}
-            ).fetchone()
+        for doc_id, storage_key in documents:
+            doc_uuid = str(doc_id)
+            job_id = str(uuid4())
 
-            if existing_job:
-                logger.info(f"Document {doc_uuid} already has job {existing_job[0]} in progress, skipping")
-                continue
-
-            logger.info(f"Queueing document {doc_uuid} for extraction")
-            job = extraction_queue_service.enqueue(
-                document_id=doc_uuid,
-                provider=ExtractionProvider.auto,
-                actor_id=current_user.username,
-                force_refresh=False
+            # Delete any existing job for this document
+            db.execute(
+                text("DELETE FROM extraction_jobs WHERE document_id = :doc_id"),
+                {"doc_id": doc_uuid}
             )
-            job_id = job.job_id if hasattr(job, 'job_id') else job.id
-            queued_jobs.append(str(job_id))
-            logger.info(f"Queued job {job_id}")
+
+            # Insert extraction job
+            db.execute(
+                text("""
+                    INSERT INTO extraction_jobs (id, document_id, claim_id, status, queued_at)
+                    VALUES (:id, :doc_id, :claim_id, 'queued', NOW())
+                """),
+                {"id": job_id, "doc_id": doc_uuid, "claim_id": str(claim_id)}
+            )
+
+            # Queue in Redis
+            r.lpush('queue:stage1_ocr_extraction', json.dumps({
+                'document_id': doc_uuid,
+                'claim_id': str(claim_id),
+                's3_key': storage_key
+            }))
+
+            queued_jobs.append(job_id)
+
+        db.commit()
+        return {
+            "status": "queued",
+            "claim_id": str(claim_id),
+            "documents_queued": len(queued_jobs),
+            "job_ids": queued_jobs,
+            "message": f"✅ Queued {len(queued_jobs)} document(s) for extraction"
+        }
 
         if len(queued_jobs) == 0:
             message = f"No new jobs queued - all {len(documents)} documents already have extraction jobs in progress or queued"
