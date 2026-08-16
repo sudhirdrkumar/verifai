@@ -70,11 +70,19 @@ def normalize_structured_json(data: dict) -> dict:
 def extract_structured_data_gemini(ocr_text: str, claim_id: str) -> dict:
     """Extract structured medical data from OCR text using Gemini"""
     try:
-        prompt = f'''Extract medical claim data from the OCR text and return ONLY valid JSON (no markdown, no extra text):
+        prompt = f'''Extract ALL medical claim data from the OCR text. Return ONLY valid JSON (no markdown, no extra text).
+
+CRITICAL: For investigation_finding_in_details, extract EVERY lab value, vital sign, and test result found:
+- List each test name with value, unit, reference range
+- Include all CBC, LFT, RFT, ABG, culture reports, imaging findings
+- Format: "Test Name: value unit (reference: range) [abnormal flag]"
+- Do NOT return generic text like "investigations were done" - extract actual VALUES
+
+JSON FORMAT:
 {{
   "company_name": "insurance company name",
-  "claim_type": "Cashless, Reimbursement, or other claim type",
-  "insured_name": "insured patient name",
+  "claim_type": "Cashless/Reimbursement/other",
+  "insured_name": "patient name",
   "hospital_name": "hospital name",
   "treating_doctor": "doctor name or '-'",
   "treating_doctor_registration_number": "registration number or '-'",
@@ -82,30 +90,28 @@ def extract_structured_data_gemini(ocr_text: str, claim_id: str) -> dict:
   "dod": "date of discharge (DD-MM-YYYY)",
   "diagnosis": "primary diagnosis",
   "complaints": "chief complaints at admission only",
-  "major_diagnostic_finding": "major findings at admission or during stay",
-  "findings": "clinical examination findings and relevant vitals",
-  "alcoholism_history": "alcohol use history or '-' when not documented",
-  "all_investigation_reports": ["test | value | unit | reference range | flag"],
-  "date_wise_investigation_reports": ["DD-MM-YYYY | test | value | unit | reference range | flag"],
-  "deranged_investigation": ["DD-MM-YYYY | abnormal test | value | unit | reference range | high/low"],
-  "daily_tpr_chart_min_max": ["DD-MM-YYYY | temperature min-max | pulse min-max | BP min-max | SpO2 min-max"],
-  "medicine_used": ["medicine | strength | route | frequency | duration | evidence source"],
-  "medicine_evidence_used": "concise medicine/treatment evidence summary",
-  "high_end_antibiotic_for_rejection": "high-end antibiotics if mentioned",
-  "investigation_finding_in_details": "newline-separated complete investigation findings",
-  "claim_amount": "claimed amount or total bill amount",
-  "admission_required": "Justified, Not Justified, or Query",
-  "final_recommendation": "ADMISSIBLE, INADMISSIBLE, or QUERY",
-  "conclusion": "evidence-based claim conclusion",
-  "recommendation": "final recommendation"
+  "major_diagnostic_finding": "vital signs and major clinical findings",
+  "findings": "clinical examination findings with vitals (BP, HR, SPO2, RR, TEMP)",
+  "alcoholism_history": "alcohol history or '-'",
+  "all_investigation_reports": ["test | value | unit | reference range"],
+  "deranged_investigation": ["abnormal test | value | abnormal flag (high/low)"],
+  "daily_tpr_chart_min_max": ["date | BP | HR | SpO2 | Temperature"],
+  "medicine_used": ["medicine | strength | route | frequency"],
+  "high_end_antibiotic_for_rejection": "meropenem/linezolid/vancomycin if present",
+  "investigation_finding_in_details": "DETAILED: list all CBC (Hemoglobin, WBC, Platelets), LFT (Bilirubin, Albumin), RFT (Creatinine), investigations with values and units",
+  "claim_amount": "claimed amount",
+  "conclusion": "evidence-based conclusion",
+  "recommendation": "APPROVE/REJECT/QUERY"
 }}
 
-Use only evidence present in OCR. Do not copy insurance questionnaire options as diagnosis,
-complaints, alcoholism, or clinical findings. Keep every investigation value with its test name,
-date, unit, reference range, and abnormal flag when present. Use [] for an unavailable list and
-"-" for an unavailable scalar.
+EXTRACTION RULES:
+1. Extract EXACT test values, not generic summaries
+2. Include units and reference ranges when available
+3. List all abnormal values under deranged_investigation
+4. For investigation_finding_in_details: Provide COMPLETE lab reports with numbers, NOT just "investigations done"
+5. Use "-" only when field truly unavailable
 
-OCR TEXT:
+OCR TEXT (from {ocr_text.count(chr(10))} lines, {len(ocr_text)} chars):
 {ocr_text}
 
 Return ONLY the JSON object, nothing else.'''
