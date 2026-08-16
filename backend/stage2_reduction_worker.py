@@ -70,50 +70,66 @@ def normalize_structured_json(data: dict) -> dict:
 def extract_structured_data_gemini(ocr_text: str, claim_id: str) -> dict:
     """Extract structured medical data from OCR text using Gemini"""
     try:
-        prompt = f'''Extract ALL medical claim data from the OCR text. Return ONLY valid JSON (no markdown, no extra text).
+        prompt = f'''You are a medical data extraction expert. Extract ALL medical claim data from the OCR text provided.
+Return ONLY valid JSON (no markdown, no extra text).
 
-CRITICAL: For investigation_finding_in_details, extract EVERY lab value, vital sign, and test result found:
-- List each test name with value, unit, reference range
-- Include all CBC, LFT, RFT, ABG, culture reports, imaging findings
-- Format: "Test Name: value unit (reference: range) [abnormal flag]"
-- Do NOT return generic text like "investigations were done" - extract actual VALUES
+CRITICAL EXTRACTION RULES:
+1. For investigation_finding_in_details: Extract EVERY lab/test result with ACTUAL VALUES
+   - Blood tests: Hemoglobin, RBC, WBC, Platelets, Hematocrit, MCV, MCH
+   - Chemistry: Creatinine, BUN, Glucose, Sodium, Potassium, Calcium
+   - Liver: Bilirubin, ALT, AST, ALP, Albumin, Total Protein
+   - Vital Signs: BP, HR, SpO2, RR, Temperature (with values and units)
+   - Imaging: USG findings, X-ray reports, CT/MRI findings (specific findings, not just "done")
+   - Culture/Serology: Blood culture, urine culture, sensitivity reports
+   - Format: "TestName: value unit (reference: normal_range)" or for vitals "BP: 120/80 mmHg, HR: 85/min"
+   - If value exceeds reference range, mark as HIGH/LOW
 
-JSON FORMAT:
+2. For deranged_investigation: List ONLY abnormal values
+   - Format: "TestName: abnormal_value unit [HIGH/LOW vs reference]"
+   - Example: "Hemoglobin: 7.5 g/dL [LOW vs 12-16]"
+
+3. For daily_tpr_chart: Extract vital signs by date
+   - Format: "DD-MM-YYYY: BP min-max | HR min-max | SpO2 | Temp"
+
+4. For medicines: Extract with dosage
+   - Format: "Medicine | Strength | Route | Frequency | Duration"
+
+5. Do NOT return generic text:
+   - ❌ "USG: YES, all investigations done"
+   - ❌ "relevant lab investigations done"
+   - ✅ "USG: Normal liver, GB, spleen; no free fluid. Kidneys normal, no hydronephrosis"
+   - ✅ "Hemoglobin: 12.5 g/dL, WBC: 8,000/μL, Platelets: 250,000/μL"
+
+REQUIRED JSON:
 {{
-  "company_name": "insurance company name",
-  "claim_type": "Cashless/Reimbursement/other",
+  "company_name": "insurance company",
+  "claim_type": "Cashless/Reimbursement",
   "insured_name": "patient name",
-  "hospital_name": "hospital name",
-  "treating_doctor": "doctor name or '-'",
-  "treating_doctor_registration_number": "registration number or '-'",
-  "doa": "date of admission (DD-MM-YYYY)",
-  "dod": "date of discharge (DD-MM-YYYY)",
+  "hospital_name": "hospital",
+  "treating_doctor": "doctor name",
+  "treating_doctor_registration_number": "reg number or '-'",
+  "doa": "DD-MM-YYYY",
+  "dod": "DD-MM-YYYY",
   "diagnosis": "primary diagnosis",
-  "complaints": "chief complaints at admission only",
-  "major_diagnostic_finding": "vital signs and major clinical findings",
-  "findings": "clinical examination findings with vitals (BP, HR, SPO2, RR, TEMP)",
-  "alcoholism_history": "alcohol history or '-'",
-  "all_investigation_reports": ["test | value | unit | reference range"],
-  "deranged_investigation": ["abnormal test | value | abnormal flag (high/low)"],
-  "daily_tpr_chart_min_max": ["date | BP | HR | SpO2 | Temperature"],
-  "medicine_used": ["medicine | strength | route | frequency"],
-  "high_end_antibiotic_for_rejection": "meropenem/linezolid/vancomycin if present",
-  "investigation_finding_in_details": "DETAILED: list all CBC (Hemoglobin, WBC, Platelets), LFT (Bilirubin, Albumin), RFT (Creatinine), investigations with values and units",
+  "complaints": "chief complaints at admission",
+  "major_diagnostic_finding": "vital signs and major findings at admission/during stay",
+  "findings": "clinical examination - vitals with values",
+  "alcoholism_history": "yes/no or '-'",
+  "all_investigation_reports": "comprehensive list of ALL tests with values and units - DO NOT SKIP ANY FINDINGS",
+  "deranged_investigation": "list ONLY abnormal/out-of-range values",
+  "daily_tpr_chart_min_max": "vital signs by date if available",
+  "medicine_used": "detailed medicine list with strength and frequency",
+  "high_end_antibiotic_for_rejection": "meropenem/linezolid/vancomycin/etc if present",
+  "investigation_finding_in_details": "MOST IMPORTANT: Detailed structured investigation findings - lab values with units and reference ranges, imaging reports with specific findings (NOT generic 'done'), vital signs with numbers",
   "claim_amount": "claimed amount",
-  "conclusion": "evidence-based conclusion",
-  "recommendation": "APPROVE/REJECT/QUERY"
+  "conclusion": "evidence-based clinical conclusion",
+  "recommendation": "APPROVE/REJECT/QUERY based on evidence"
 }}
 
-EXTRACTION RULES:
-1. Extract EXACT test values, not generic summaries
-2. Include units and reference ranges when available
-3. List all abnormal values under deranged_investigation
-4. For investigation_finding_in_details: Provide COMPLETE lab reports with numbers, NOT just "investigations done"
-5. Use "-" only when field truly unavailable
-
-OCR TEXT (from {ocr_text.count(chr(10))} lines, {len(ocr_text)} chars):
+OCR TEXT ({len(ocr_text)} chars):
 {ocr_text}
 
+CRITICAL: Extract actual investigation VALUES, not generic summaries. Include units, reference ranges, and abnormal flags.
 Return ONLY the JSON object, nothing else.'''
 
         model = genai.GenerativeModel(GEMINI_MODEL)
@@ -215,6 +231,7 @@ def auto_generate_report(cur, claim_id: str, structured_json: dict):
         alcoholism_history = structured_json.get('alcoholism_history', 'NAD')
         clinical_findings = structured_json.get('clinical_findings', '-')
         investigation_reports = structured_json.get('investigation_reports', '-')
+        investigation_details = structured_json.get('investigation_finding_in_details', 'Not detailed')
         deranged_investigation = structured_json.get('deranged_investigation', 'No deranged investigation values found.')
         daily_tpr = structured_json.get('daily_tpr_chart', '-')
         medicine_used = structured_json.get('medicine_used', '-')
@@ -262,7 +279,14 @@ def auto_generate_report(cur, claim_id: str, structured_json: dict):
 <div style="background-color: #f5f5f5; padding: 8px; margin: 12px 0; font-weight: bold; font-size: 12px;">ALL INVESTIGATION REPORTS</div>
 <table style="width: 100%; border-collapse: collapse; margin: 8px 0;">
 <tbody>
-<tr><td style="padding: 6px; border: 1px solid #ddd; white-space: pre-wrap;">{investigation_reports}</td></tr>
+<tr><td style="padding: 6px; border: 1px solid #ddd; white-space: pre-wrap; font-family: monospace;">{investigation_reports if investigation_reports and investigation_reports != '-' else 'No specific investigation values documented'}</td></tr>
+</tbody>
+</table>
+
+<div style="background-color: #f5f5f5; padding: 8px; margin: 12px 0; font-weight: bold; font-size: 12px;">INVESTIGATION FINDINGS IN DETAIL</div>
+<table style="width: 100%; border-collapse: collapse; margin: 8px 0;">
+<tbody>
+<tr><td style="padding: 6px; border: 1px solid #ddd; white-space: pre-wrap; font-family: monospace;">{investigation_details if investigation_details and investigation_details != '-' else 'No detailed investigation findings'}</td></tr>
 </tbody>
 </table>
 
