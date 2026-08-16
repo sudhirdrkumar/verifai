@@ -78,6 +78,8 @@
   const pageTitleEl = document.getElementById("page-title");
   const welcomeLineEl = document.getElementById("welcome-line");
   const sideNavEl = document.getElementById("side-nav-links");
+  console.log("🔍 sideNavEl found:", sideNavEl ? "YES" : "NO");
+  console.log("🔍 NAV object keys:", Object.keys(NAV));
   const contentPanel = document.getElementById("content-panel");
   const headerActions = document.getElementById("header-actions");
   let completedReportsMessageHandler = null;
@@ -666,10 +668,17 @@
 
   function renderNav(activeRole, activePage) {
     const links = NAV[activeRole] || [];
-    sideNavEl.innerHTML = links.map((item) => {
-      const activeClass = item.page === activePage ? " active" : "";
-      return '<a class="side-nav__link' + activeClass + '" href="' + navHref(activeRole, item.page) + '">' + escapeHtml(item.label) + "</a>";
-    }).join("");
+    console.log("🔍 renderNav called with role:", activeRole, "page:", activePage);
+    console.log("🔍 Found", links.length, "links for role", activeRole);
+    if (sideNavEl) {
+      sideNavEl.innerHTML = links.map((item) => {
+        const activeClass = item.page === activePage ? " active" : "";
+        return '<a class="side-nav__link' + activeClass + '" href="' + navHref(activeRole, item.page) + '">' + escapeHtml(item.label) + "</a>";
+      }).join("");
+      console.log("✅ Navbar rendered with", links.length, "items");
+    } else {
+      console.error("❌ sideNavEl not found!");
+    }
   }
 
   function renderClaimsTable(items) {
