@@ -1848,7 +1848,11 @@ def process_claim_endpoint(
             {"claim_id": str(claim_id)},
         )
         documents = db.execute(
-            text("SELECT id FROM claim_documents WHERE claim_id = :claim_id ORDER BY uploaded_at, id"),
+            text(
+                "SELECT id FROM claim_documents "
+                "WHERE claim_id = :claim_id "
+                "ORDER BY uploaded_at NULLS LAST, id"
+            ),
             {"claim_id": str(claim_id)}
         ).fetchall()
 

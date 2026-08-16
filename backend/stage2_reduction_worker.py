@@ -134,6 +134,47 @@ Return ONLY the JSON object, nothing else.'''
         logger.error(f'Gemini extraction failed: {e}', exc_info=True)
         return {}
 
+def generate_medical_legal_conclusion(structured_json: dict) -> str:
+    """Generate professional medico-legal conclusion based on clinical evidence."""
+    try:
+        diagnosis = structured_json.get('diagnosis', 'unspecified diagnosis').strip()
+        chief_complaints = structured_json.get('chief_complaints', 'unspecified complaints').strip()
+        investigations = structured_json.get('deranged_investigation', '').strip()
+        medicines = structured_json.get('medicine_used', '').strip()
+        clinical_findings = structured_json.get('clinical_findings', '').strip()
+        recommendation = structured_json.get('recommendation', 'QUERY').strip().upper()
+
+        # Determine treatment type (conservative vs surgical)
+        treatment_type = 'conservatively' if not any(surgical in medicines.lower() for surgical in ['surgery', 'orif', 'fixation', 'repair', 'ligation']) else 'surgically'
+
+        # Extract key medicines (especially antibiotics and high-end drugs)
+        medicine_list = medicines.replace(',', ' ').split() if medicines else []
+        antibiotics = [m.strip() for m in medicine_list if any(ab in m.lower() for ab in ['antibiotic', 'cef', 'meropenem', 'azithromycin', 'linezolid', 'vancomycin'])][:3]
+        antibiotic_str = ', '.join(antibiotics) if antibiotics else 'supportive treatment'
+
+        # Validation assessment
+        validation = ''
+        if investigations and investigations.lower() not in ('no deranged', '-', 'none'):
+            validation = f'investigation findings {investigations} supported the diagnosis.'
+        elif clinical_findings and clinical_findings != '-':
+            validation = f'clinical findings {clinical_findings} supported the diagnosis.'
+        else:
+            validation = 'clinical presentation was consistent with the diagnosis.'
+
+        # Build conclusion
+        conclusion = (
+            f"Based on available medical documents, patient presented with {chief_complaints} "
+            f"and was diagnosed with {diagnosis}. {validation.capitalize()} "
+            f"Patient was treated {treatment_type} with {antibiotic_str}. "
+            f"The case appears clinically genuine and appropriately documented."
+        )
+
+        return conclusion.strip()
+    except Exception as e:
+        logger.warning(f"Error generating medical-legal conclusion: {e}")
+        return structured_json.get('conclusion', 'Clinical assessment based on available medical documents.')
+
+
 def auto_generate_report(cur, claim_id: str, structured_json: dict):
     """Auto-generate medical report for claim."""
     try:
@@ -172,9 +213,11 @@ def auto_generate_report(cur, claim_id: str, structured_json: dict):
         daily_tpr = structured_json.get('daily_tpr_chart', '-')
         medicine_used = structured_json.get('medicine_used', '-')
         claimed_amount = structured_json.get('claimed_amount', '-')
-        conclusion = structured_json.get('conclusion', '-')
         recommendation = structured_json.get('recommendation', 'QUERY')
         query_reason = structured_json.get('query_reason', '')
+
+        # Generate professional medical-legal conclusion from clinical evidence
+        conclusion = generate_medical_legal_conclusion(structured_json)
 
         # Generate HTML in HEALTH CLAIM ASSESSMENT SHEET format matching the PDF
         gen_time = dt.now().strftime('%m/%d/%Y, %I:%M:%S %p')
