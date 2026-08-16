@@ -100,7 +100,7 @@ CRITICAL EXTRACTION RULES:
    - ✅ "USG: Normal liver, GB, spleen; no free fluid. Kidneys normal, no hydronephrosis"
    - ✅ "Hemoglobin: 12.5 g/dL, WBC: 8,000/μL, Platelets: 250,000/μL"
 
-REQUIRED JSON:
+REQUIRED JSON - EXTRACT ALL SECTIONS:
 {{
   "company_name": "insurance company",
   "claim_type": "Cashless/Reimbursement",
@@ -115,15 +115,16 @@ REQUIRED JSON:
   "major_diagnostic_finding": "vital signs and major findings at admission/during stay",
   "findings": "clinical examination - vitals with values",
   "alcoholism_history": "yes/no or '-'",
-  "all_investigation_reports": "comprehensive list of ALL tests with values and units - DO NOT SKIP ANY FINDINGS",
-  "deranged_investigation": "list ONLY abnormal/out-of-range values",
-  "daily_tpr_chart_min_max": "vital signs by date if available",
-  "medicine_used": "detailed medicine list with strength and frequency",
-  "high_end_antibiotic_for_rejection": "meropenem/linezolid/vancomycin/etc if present",
-  "investigation_finding_in_details": "MOST IMPORTANT: Detailed structured investigation findings - lab values with units and reference ranges, imaging reports with specific findings (NOT generic 'done'), vital signs with numbers",
+  "all_investigation_reports": "ALL lab tests with values: list line-by-line each test (CBC: Hemoglobin, WBC, Platelets, RBC, etc; LFT: Bilirubin, ALT, AST, Albumin, etc; RFT: Creatinine, BUN, etc; imaging: USG findings, X-ray findings, etc)",
+  "date_wise_investigation_reports": "if dates available: DD-MM-YYYY: Test1 value, Test2 value, etc. List by date of investigation",
+  "deranged_investigation": "ONLY abnormal values: TestName: abnormal_value [HIGH/LOW]",
+  "daily_tpr_chart_min_max": "Vital signs with min-max: Date | BP min-max | HR min-max | SpO2 | Temp min-max",
+  "medicine_used": "Every medicine listed with strength and frequency: Medicine | Strength | Route | Frequency | Duration",
+  "high_end_antibiotic_for_rejection": "meropenem/linezolid/vancomycin/ciprofloxacin/etc if present",
+  "investigation_finding_in_details": "Complete lab report with ALL values - CBC (Hemoglobin, WBC, Platelets, RBC, Hematocrit), LFT (Bilirubin, Albumin, AST, ALT, ALP), RFT (Creatinine, BUN), imaging findings with details",
   "claim_amount": "claimed amount",
-  "conclusion": "evidence-based clinical conclusion",
-  "recommendation": "APPROVE/REJECT/QUERY based on evidence"
+  "conclusion": "detailed clinical conclusion with clinical reasoning",
+  "recommendation": "APPROVE/REJECT/QUERY with justification"
 }}
 
 OCR TEXT ({len(ocr_text)} chars):
@@ -230,10 +231,11 @@ def auto_generate_report(cur, claim_id: str, structured_json: dict):
         major_findings = structured_json.get('major_diagnostic_findings', '-')
         alcoholism_history = structured_json.get('alcoholism_history', 'NAD')
         clinical_findings = structured_json.get('clinical_findings', '-')
-        investigation_reports = structured_json.get('investigation_reports', '-')
+        investigation_reports = structured_json.get('all_investigation_reports', structured_json.get('investigation_reports', '-'))
         investigation_details = structured_json.get('investigation_finding_in_details', 'Not detailed')
+        datewise_investigations = structured_json.get('date_wise_investigation_reports', '-')
         deranged_investigation = structured_json.get('deranged_investigation', 'No deranged investigation values found.')
-        daily_tpr = structured_json.get('daily_tpr_chart', '-')
+        daily_tpr = structured_json.get('daily_tpr_chart_min_max', structured_json.get('daily_tpr_chart', '-'))
         medicine_used = structured_json.get('medicine_used', '-')
         claimed_amount = structured_json.get('claimed_amount', '-')
         recommendation = structured_json.get('recommendation', 'QUERY')
@@ -280,6 +282,13 @@ def auto_generate_report(cur, claim_id: str, structured_json: dict):
 <table style="width: 100%; border-collapse: collapse; margin: 8px 0;">
 <tbody>
 <tr><td style="padding: 6px; border: 1px solid #ddd; white-space: pre-wrap; font-family: monospace;">{investigation_reports if investigation_reports and investigation_reports != '-' else 'No specific investigation values documented'}</td></tr>
+</tbody>
+</table>
+
+<div style="background-color: #f5f5f5; padding: 8px; margin: 12px 0; font-weight: bold; font-size: 12px;">DATE-WISE INVESTIGATION REPORTS</div>
+<table style="width: 100%; border-collapse: collapse; margin: 8px 0;">
+<tbody>
+<tr><td style="padding: 6px; border: 1px solid #ddd; white-space: pre-wrap; font-family: monospace;">{datewise_investigations if datewise_investigations and datewise_investigations != '-' else 'No date-wise investigation reports available.'}</td></tr>
 </tbody>
 </table>
 
