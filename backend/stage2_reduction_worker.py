@@ -137,6 +137,56 @@ def report_field_text(value) -> str:
     return str(value).strip()
 
 
+def legacy_extraction_text(raw_response, extracted_entities, model_name='') -> str:
+    """Return report-ready source text from current or legacy extraction rows."""
+    raw_text = str(raw_response or '').strip()
+    if raw_text:
+        return raw_text
+    if str(model_name or '').lower() == 'policy-excluded':
+        return ''
+
+    entities = extracted_entities
+    if isinstance(entities, str):
+        try:
+            entities = json.loads(entities)
+        except json.JSONDecodeError:
+            return entities.strip()
+    if not entities:
+        return ''
+    if isinstance(entities, dict) and (
+        entities.get('excluded') is True or entities.get('kyc_excluded') is True
+    ):
+        return ''
+
+    ignored_keys = {
+        'mime_type', 'text_source', 'document_name', 'excluded',
+        'kyc_excluded', 'reason',
+    }
+
+    def prune(value):
+        if isinstance(value, dict):
+            result = {}
+            for key, item in value.items():
+                if str(key).lower() in ignored_keys:
+                    continue
+                cleaned = prune(item)
+                if cleaned not in (None, '', [], {}):
+                    result[key] = cleaned
+            return result
+        if isinstance(value, list):
+            return [cleaned for item in value if (cleaned := prune(item)) not in (None, '', [], {})]
+        if isinstance(value, str):
+            return value.strip()
+        return value
+
+    cleaned_entities = prune(entities)
+    if cleaned_entities in (None, '', [], {}):
+        return ''
+    if isinstance(cleaned_entities, str):
+        return cleaned_entities
+    return json.dumps(cleaned_entities, ensure_ascii=False, separators=(',', ':'))
+
+
 def normalize_structured_json(data: dict) -> dict:
     normalized = dict(data or {})
     aliases = {
@@ -662,10 +712,12 @@ def run_stage2_loop():
 
                 # Get OCR text from ALL documents in Stage 1 and combine
                 cur.execute('''
-                    SELECT latest.raw_response, latest.file_name
+                    SELECT latest.raw_response, latest.extracted_entities,
+                           latest.model_name, latest.file_name
                     FROM (
                         SELECT DISTINCT ON (de.document_id)
-                            de.document_id, de.raw_response, cd.file_name, de.created_at
+                            de.document_id, de.raw_response, de.extracted_entities,
+                            de.model_name, cd.file_name, de.created_at
                         FROM document_extractions de
                         JOIN claim_documents cd ON de.document_id = cd.id
                         WHERE cd.claim_id = %s
@@ -681,9 +733,14 @@ def run_stage2_loop():
                 # Combine OCR from all documents
                 combined_texts = []
                 for row in ocr_rows:
-                    ocr_data, filename = row
-                    if ocr_data:
-                        combined_texts.append(f'--- Document: {filename} ---\n{ocr_data}')
+                    raw_response, extracted_entities, model_name, filename = row
+                    source_text = legacy_extraction_text(
+                        raw_response,
+                        extracted_entities,
+                        model_name,
+                    )
+                    if source_text:
+                        combined_texts.append(f'--- Document: {filename} ---\n{source_text}')
 
                 ocr_text = '\n\n'.join(combined_texts)
                 logger.info(f'Combined OCR from {len(ocr_rows)} documents: {len(ocr_text)} chars for claim {claim_id}')

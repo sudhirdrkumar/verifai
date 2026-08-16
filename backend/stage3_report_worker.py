@@ -54,8 +54,9 @@ def run_stage3_loop():
                     conn.commit()
                 logger.info('Report saved and versioned for claim %s', claim_id)
             except Exception:
-                r.delete(f'queue:stage3_scheduled:{claim_id}')
                 logger.exception('Stage 3 failed for claim %s', claim_id)
+            finally:
+                r.delete(f'queue:stage3_scheduled:{claim_id}')
 
         except redis.exceptions.TimeoutError:
             continue

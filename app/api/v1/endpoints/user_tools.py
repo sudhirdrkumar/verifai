@@ -2676,7 +2676,7 @@ def claim_document_status(
             normalized_status = "all"
 
         normalized_pipeline_status = (pipeline_status or "all").strip().lower()
-        if normalized_pipeline_status not in {"all", "failed", "success", "queued", "pending"}:
+        if normalized_pipeline_status not in {"all", "failed", "success", "ready_for_report", "queued", "pending"}:
             normalized_pipeline_status = "all"
 
         normalized_document_upload = (document_upload or "all").strip().lower()
@@ -2707,6 +2707,9 @@ def claim_document_status(
             "(COALESCE(ds.documents, 0) > 0 AND "
             "(SELECT COUNT(DISTINCT ej.document_id) FROM extraction_jobs ej "
             "WHERE ej.claim_id = c.id AND LOWER(COALESCE(ej.status, '')) = 'succeeded') >= COALESCE(ds.documents, 0))"
+        )
+        pipeline_ready_for_report_expr = (
+            f"(({pipeline_all_extracted_expr}) AND ({pipeline_structured_expr}) AND ({pipeline_success_expr}))"
         )
         pipeline_failed_job_expr = (
             "EXISTS (SELECT 1 FROM extraction_jobs ej "
@@ -2760,7 +2763,9 @@ def claim_document_status(
         elif normalized_status != "all":
             filters.append("c.status = :status_filter")
             params["status_filter"] = normalized_status
-        if normalized_pipeline_status == "success":
+        if normalized_pipeline_status == "ready_for_report":
+            filters.append(pipeline_ready_for_report_expr)
+        elif normalized_pipeline_status == "success":
             filters.append(pipeline_success_expr)
         elif normalized_pipeline_status == "queued":
             filters.append(pipeline_queued_expr)

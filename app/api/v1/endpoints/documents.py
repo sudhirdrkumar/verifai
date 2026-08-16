@@ -50,6 +50,21 @@ from app.core.config import settings
 router = APIRouter(tags=["documents"])
 
 
+def _queue_document_for_extraction(document: DocumentResponse, actor_id: str | None) -> None:
+    """Create the extraction job and hand the document to the Redis Stage 1 queue."""
+    try:
+        queue_service = ExtractionQueueService()
+        queue_service.enqueue(
+            document_id=document.id,
+            provider=ExtractionProvider.auto,
+            actor_id=actor_id,
+            force_refresh=False,
+        )
+        logger.info("Queued document %s for Stage 1 OCR", document.id)
+    except Exception as queue_err:
+        logger.warning("Failed to queue document %s: %s", document.id, queue_err, exc_info=True)
+
+
 def _create_document_in_thread(
     claim_id: UUID,
     file_name: str,
@@ -147,19 +162,7 @@ async def upload_document_endpoint(
         )
         logger.info(f"✅ Document {document.id} created for claim {claim_id}")
 
-        # Queue one canonical Stage 1 task; the worker uses Textract.
-        try:
-            queue_service = ExtractionQueueService()
-            queue_service.enqueue(
-                document_id=document.id,
-                provider=ExtractionProvider.auto,
-                actor_id=uploaded_by or current_user.username,
-                force_refresh=False,
-            )
-            logger.info(f"Queued document {document.id} for Stage 1 Textract OCR")
-
-        except Exception as queue_err:
-            logger.warning(f"Failed to queue document {document.id}: {queue_err}")
+        _queue_document_for_extraction(document, uploaded_by or current_user.username)
 
         return document
 
@@ -223,7 +226,7 @@ def complete_document_upload_endpoint(
             raise HTTPException(status_code=403, detail="doctor can access only assigned claims")
 
     try:
-        return create_document_from_uploaded_object(
+        document = create_document_from_uploaded_object(
             db=db,
             claim_id=claim_id,
             storage_key=payload.storage_key,
@@ -234,6 +237,8 @@ def complete_document_upload_endpoint(
             retention_class=payload.retention_class,
             checksum_sha256=payload.checksum_sha256,
         )
+        _queue_document_for_extraction(document, payload.uploaded_by or current_user.username)
+        return document
     except ClaimNotFoundError as exc:
         raise HTTPException(status_code=404, detail="claim not found") from exc
     except StorageConfigError as exc:

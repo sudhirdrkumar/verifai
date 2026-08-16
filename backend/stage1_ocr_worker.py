@@ -11,6 +11,12 @@ import mimetypes
 import requests
 from dotenv import load_dotenv
 
+from ocr_batching import (
+    excluded_document_reason,
+    group_documents_by_size,
+    parse_batched_ocr_response,
+)
+
 # Load .env file
 load_dotenv()
 
@@ -28,8 +34,46 @@ OPENAI_API_KEY = os.getenv('OPENAI_API_KEY')
 OPENAI_MODEL = os.getenv('OPENAI_VISION_MODEL', 'gpt-4o-mini')
 OPENAI_MAX_FILE_BYTES = int(os.getenv('OPENAI_MAX_FILE_BYTES', 20 * 1024 * 1024))
 OPENAI_MAX_OUTPUT_TOKENS = int(os.getenv('OPENAI_MAX_OUTPUT_TOKENS', 16000))
+OPENAI_BATCH_MAX_BYTES = int(os.getenv('OPENAI_BATCH_MAX_BYTES', 7 * 1024 * 1024))
+OPENAI_BATCH_MAX_FILES = max(1, int(os.getenv('OPENAI_BATCH_MAX_FILES', 4)))
+STAGE1_QUEUE = 'queue:stage1_ocr_extraction'
+STAGE1_DELAYED_CLAIMS = 'queue:stage1_ocr_extraction:delayed_claims'
+STAGE1_RECOVERY_LOCK = 'lock:stage1_ocr_extraction:recover_stale_jobs'
+STAGE1_RECOVERY_INTERVAL_SECONDS = max(
+    15,
+    int(os.getenv('STAGE1_RECOVERY_INTERVAL_SECONDS', 30)),
+)
+STAGE1_RECOVERY_STALE_SECONDS = max(
+    60,
+    int(os.getenv('STAGE1_RECOVERY_STALE_SECONDS', 120)),
+)
 
 r = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, decode_responses=True, socket_keepalive=True)
+
+POP_DUE_CLAIM_TASKS = r.register_script('''
+local score = redis.call('ZSCORE', KEYS[1], ARGV[1])
+if not score or tonumber(score) > tonumber(ARGV[2]) then
+    return {}
+end
+redis.call('ZREM', KEYS[1], ARGV[1])
+local tasks = redis.call('HVALS', KEYS[2])
+redis.call('DEL', KEYS[2])
+return tasks
+''')
+
+
+def pop_due_claim_tasks():
+    for claim_id in r.zrangebyscore(STAGE1_DELAYED_CLAIMS, 0, time.time(), start=0, num=10):
+        task_key = f'queue:stage1_ocr_extraction:claim:{claim_id}'
+        raw_tasks = POP_DUE_CLAIM_TASKS(
+            keys=[STAGE1_DELAYED_CLAIMS, task_key],
+            args=[claim_id, time.time()],
+        )
+        if raw_tasks:
+            tasks = [json.loads(raw_task) for raw_task in raw_tasks]
+            logger.info('Claim %s debounce complete with %s documents', claim_id, len(tasks))
+            return tasks
+    return []
 
 # Create S3 client with explicit credentials if available
 s3_kwargs = {'region_name': AWS_REGION}
@@ -142,6 +186,88 @@ def extract_with_openai_vision(bucket, key, file_size):
         logger.warning('OpenAI extraction failed for %s: %s', key, e)
         return None
 
+
+def extract_with_openai_vision_batch(documents):
+    """Extract multiple PDFs in one request and return text keyed by document ID."""
+    if not OPENAI_API_KEY or len(documents) < 2:
+        return {}
+
+    total_bytes = sum(int(document['file_size']) for document in documents)
+    if total_bytes > OPENAI_BATCH_MAX_BYTES:
+        logger.warning('Skipping oversized OpenAI batch: %.2fMB', total_bytes / 1024 / 1024)
+        return {}
+
+    try:
+        content = [{
+            'type': 'input_text',
+            'text': (
+                'OCR each attached medical-claim PDF independently. Do not mix patient or document data. '
+                'Preserve headings, tables, dates, medicine names, investigation values, units, and reference ranges. '
+                'Return ONLY valid JSON in this exact shape: '
+                '{"documents":[{"document_id":"the supplied ID","text":"complete extracted text"}]}. '
+                'Return exactly one item for every supplied document ID.'
+            ),
+        }]
+        expected_ids = set()
+        for document in documents:
+            document_id = str(document['document_id'])
+            expected_ids.add(document_id)
+            file_bytes = s3.get_object(Bucket=document['s3_bucket'], Key=document['s3_key'])['Body'].read()
+            data_url = 'data:application/pdf;base64,' + base64.b64encode(file_bytes).decode('ascii')
+            content.extend([
+                {
+                    'type': 'input_text',
+                    'text': f'Document ID: {document_id}\nFilename: {document["file_name"]}',
+                },
+                {
+                    'type': 'input_file',
+                    'filename': document['file_name'],
+                    'file_data': data_url,
+                },
+            ])
+
+        response = requests.post(
+            'https://api.openai.com/v1/responses',
+            headers={
+                'Authorization': f'Bearer {OPENAI_API_KEY}',
+                'Content-Type': 'application/json',
+            },
+            json={
+                'model': OPENAI_MODEL,
+                'input': [{'role': 'user', 'content': content}],
+                'max_output_tokens': OPENAI_MAX_OUTPUT_TOKENS,
+            },
+            timeout=240,
+        )
+        if response.status_code != 200:
+            logger.warning('OpenAI batch API error %s: %s', response.status_code, response.text[:500])
+            return {}
+
+        response_body = response.json()
+        output_parts = []
+        for item in response_body.get('output', []):
+            if item.get('type') != 'message':
+                continue
+            for part in item.get('content', []):
+                if part.get('type') == 'output_text' and part.get('text'):
+                    output_parts.append(part['text'])
+        if response_body.get('status') == 'incomplete':
+            logger.warning('OpenAI batch response incomplete: %s', response_body.get('incomplete_details'))
+            return {}
+
+        results = parse_batched_ocr_response('\n'.join(output_parts), expected_ids)
+        logger.info(
+            'OpenAI %s batch extracted %s/%s PDFs in one request (%.2fMB)',
+            OPENAI_MODEL,
+            len(results),
+            len(documents),
+            total_bytes / 1024 / 1024,
+        )
+        return results
+    except Exception as e:
+        logger.warning('OpenAI batch extraction failed: %s', e, exc_info=True)
+        return {}
+
 def extract_with_textract(bucket, key):
     """Fallback: Use AWS Textract for text extraction"""
     try:
@@ -229,7 +355,7 @@ def get_document_state(doc_id):
     with psycopg.connect(DB_DSN) as conn:
         with conn.cursor() as cur:
             cur.execute('''
-                SELECT cd.claim_id, cd.storage_key, cd.parse_status,
+                SELECT cd.claim_id, cd.storage_key, cd.parse_status, cd.file_name,
                        EXISTS (
                            SELECT 1 FROM document_extractions de
                            WHERE de.document_id = cd.id
@@ -244,7 +370,8 @@ def get_document_state(doc_id):
         'claim_id': str(row[0]),
         'storage_key': str(row[1] or ''),
         'parse_status': str(row[2] or ''),
-        'has_extraction': bool(row[3]) or str(row[2] or '').lower() == 'succeeded',
+        'file_name': str(row[3] or ''),
+        'has_extraction': bool(row[4]) or str(row[2] or '').lower() == 'succeeded',
     }
 
 
@@ -256,6 +383,257 @@ def normalize_s3_location(storage_key, default_bucket):
         bucket = location[0]
         key = location[1] if len(location) > 1 else ''
     return bucket, key
+
+
+def reconcile_stale_extraction_jobs():
+    """Repair DB jobs that were left active after their Redis task disappeared."""
+    if not r.set(
+        STAGE1_RECOVERY_LOCK,
+        str(os.getpid()),
+        nx=True,
+        ex=STAGE1_RECOVERY_INTERVAL_SECONDS,
+    ):
+        return
+
+    recovered_tasks = []
+    completed_jobs = 0
+    try:
+        with psycopg.connect(DB_DSN) as conn:
+            with conn.cursor() as cur:
+                cur.execute('''
+                    UPDATE extraction_jobs ej
+                    SET status = 'succeeded',
+                        finished_at = COALESCE(ej.finished_at, NOW()),
+                        error_message = NULL
+                    WHERE ej.status IN ('queued', 'processing', 'running')
+                      AND EXISTS (
+                          SELECT 1 FROM document_extractions de
+                          WHERE de.document_id = ej.document_id
+                      )
+                    RETURNING ej.claim_id
+                ''')
+                completed_jobs = cur.rowcount
+                completed_claim_ids = {
+                    str(row[0]) for row in cur.fetchall()
+                }
+                cur.execute('''
+                    UPDATE claim_documents cd
+                    SET parse_status = 'succeeded'
+                    WHERE COALESCE(cd.parse_status::text, '') <> 'succeeded'
+                      AND EXISTS (
+                          SELECT 1 FROM document_extractions de
+                          WHERE de.document_id = cd.id
+                      )
+                ''')
+                cur.execute('''
+                    SELECT DISTINCT ON (ej.document_id)
+                        ej.id, ej.document_id, ej.claim_id,
+                        COALESCE(cd.storage_key, ''), COALESCE(cd.file_name, '')
+                    FROM extraction_jobs ej
+                    JOIN claim_documents cd ON cd.id = ej.document_id
+                    WHERE ej.status = 'queued'
+                      AND ej.queued_at < NOW() - (%s * INTERVAL '1 second')
+                      AND NOT EXISTS (
+                          SELECT 1 FROM document_extractions de
+                          WHERE de.document_id = ej.document_id
+                      )
+                    ORDER BY ej.document_id, ej.queued_at DESC NULLS LAST, ej.created_at DESC
+                    LIMIT 100
+                ''', (STAGE1_RECOVERY_STALE_SECONDS,))
+                rows = cur.fetchall()
+
+        for job_id, document_id, claim_id, storage_key, file_name in rows:
+            marker = f'queue:stage1_ocr_extraction:recovered:{job_id}'
+            if not r.set(marker, '1', nx=True, ex=600):
+                continue
+
+            bucket, key = normalize_s3_location(storage_key, S3_BUCKET)
+            if not key:
+                update_extraction_job(
+                    str(document_id),
+                    'failed',
+                    'Document storage_key is missing',
+                    str(job_id),
+                )
+                continue
+
+            recovered_tasks.append({
+                'job_id': str(job_id),
+                'document_id': str(document_id),
+                'claim_id': str(claim_id),
+                's3_bucket': bucket,
+                's3_key': key,
+                'file_name': str(file_name or ''),
+                'force_refresh': False,
+            })
+
+        if recovered_tasks:
+            pipe = r.pipeline(transaction=False)
+            claim_ids = set()
+            for task in recovered_tasks:
+                claim_id = task['claim_id']
+                claim_ids.add(claim_id)
+                task_key = f'queue:stage1_ocr_extraction:claim:{claim_id}'
+                pipe.hset(task_key, task['job_id'], json.dumps(task))
+                pipe.expire(task_key, 86400)
+            for claim_id in claim_ids:
+                pipe.zadd(STAGE1_DELAYED_CLAIMS, {claim_id: time.time()})
+            pipe.execute()
+
+        if completed_jobs or recovered_tasks:
+            logger.info(
+                'Stage 1 recovery closed %s stale jobs and restored %s missing tasks',
+                completed_jobs,
+                len(recovered_tasks),
+            )
+
+        for claim_id in completed_claim_ids:
+            queue_next_stage_if_ready(claim_id)
+    except Exception:
+        r.delete(STAGE1_RECOVERY_LOCK)
+        raise
+
+
+def save_document_extraction(document, raw_text, model_name, extracted_entities='{}'):
+    compressed_text = clean_and_compress_ocr(raw_text)
+    with psycopg.connect(DB_DSN) as conn:
+        with conn.cursor() as cur:
+            cur.execute('''
+                INSERT INTO document_extractions (
+                    document_id, claim_id, extraction_version, model_name,
+                    extracted_entities, raw_response, created_at
+                )
+                VALUES (%s, %s, %s, %s, %s, %s, NOW())
+                ON CONFLICT (document_id, extraction_version) DO UPDATE SET
+                    model_name = EXCLUDED.model_name,
+                    extracted_entities = EXCLUDED.extracted_entities,
+                    raw_response = EXCLUDED.raw_response,
+                    created_at = NOW()
+            ''', (
+                document['document_id'],
+                document['claim_id'],
+                'stage1_ocr_v2',
+                model_name,
+                extracted_entities,
+                compressed_text,
+            ))
+            cur.execute(
+                'UPDATE claim_documents SET parse_status = %s WHERE id = %s',
+                ('succeeded', document['document_id']),
+            )
+    return compressed_text
+
+
+def prepare_document_task(task):
+    doc_id = str(task.get('document_id') or '').strip()
+    job_id = str(task.get('job_id') or '').strip() or None
+    force_refresh = bool(task.get('force_refresh', False))
+    if not doc_id:
+        logger.error('Discarding Stage 1 task without document_id: %s', task)
+        return None, None
+
+    document_state = get_document_state(doc_id)
+    if not document_state:
+        logger.error('Discarding Stage 1 task for missing document %s', doc_id)
+        return None, None
+
+    claim_id = str(task.get('claim_id') or document_state['claim_id'])
+    s3_bucket, s3_key = normalize_s3_location(
+        task.get('s3_key') or document_state['storage_key'],
+        task.get('s3_bucket') or S3_BUCKET,
+    )
+    document = {
+        'document_id': doc_id,
+        'job_id': job_id,
+        'claim_id': claim_id,
+        's3_bucket': s3_bucket,
+        's3_key': s3_key,
+        'file_name': document_state['file_name'] or s3_key.rsplit('/', 1)[-1],
+        'force_refresh': force_refresh,
+    }
+
+    if not s3_key:
+        error_msg = 'Document storage_key is missing'
+        update_extraction_job(doc_id, 'failed', error_msg, job_id)
+        logger.error('%s for document %s', error_msg, doc_id)
+        return None, claim_id
+
+    if document_state['has_extraction'] and not force_refresh:
+        logger.info('Skipping already-extracted document %s', doc_id)
+        update_extraction_job(doc_id, 'succeeded', job_id=job_id)
+        return None, claim_id
+
+    exclusion_reason = excluded_document_reason(document['file_name'])
+    if exclusion_reason:
+        update_extraction_job(doc_id, 'processing', job_id=job_id)
+        save_document_extraction(
+            document,
+            '',
+            'policy-excluded',
+            json.dumps({'excluded': True, 'reason': exclusion_reason}),
+        )
+        update_extraction_job(doc_id, 'succeeded', job_id=job_id)
+        logger.info('Excluded %s from OCR: %s', document['file_name'], exclusion_reason)
+        return None, claim_id
+
+    file_size = get_file_size_s3(s3_bucket, s3_key)
+    if file_size is None:
+        error_msg = f'Could not determine file size for {s3_key}'
+        update_extraction_job(doc_id, 'failed', error_msg, job_id)
+        logger.error(error_msg)
+        return None, claim_id
+
+    document['file_size'] = int(file_size)
+    document['mime_type'] = mimetypes.guess_type(document['file_name'])[0] or 'application/octet-stream'
+    return document, claim_id
+
+
+def group_documents_for_extraction(documents):
+    return group_documents_by_size(
+        documents,
+        max_bytes=OPENAI_BATCH_MAX_BYTES,
+        max_files=OPENAI_BATCH_MAX_FILES,
+    )
+
+
+def process_document_group(documents):
+    for document in documents:
+        update_extraction_job(document['document_id'], 'processing', job_id=document['job_id'])
+
+    batch_results = extract_with_openai_vision_batch(documents) if len(documents) > 1 else {}
+    for document in documents:
+        try:
+            extracted_text = batch_results.get(document['document_id'])
+            extraction_model = f'{OPENAI_MODEL}-batch' if extracted_text else OPENAI_MODEL
+            if len(documents) == 1:
+                extracted_text = extract_with_openai_vision(
+                    document['s3_bucket'],
+                    document['s3_key'],
+                    document['file_size'],
+                )
+            if not extracted_text:
+                logger.info('Falling back to Textract for %s', document['s3_key'])
+                extracted_text = extract_with_textract(document['s3_bucket'], document['s3_key'])
+                extraction_model = 'aws_textract'
+            if not extracted_text:
+                raise RuntimeError('OpenAI and AWS Textract extraction failed')
+
+            compressed_text = save_document_extraction(document, extracted_text, extraction_model)
+            update_extraction_job(document['document_id'], 'succeeded', job_id=document['job_id'])
+            logger.info(
+                'Document %s completed: %s chars compressed to %s chars',
+                document['document_id'],
+                len(extracted_text),
+                len(compressed_text),
+            )
+        except Exception as e:
+            logger.error(
+                'Stage 1 Error on Document %s: %s',
+                document['document_id'],
+                e,
+                exc_info=True,
+            )
+            update_extraction_job(document['document_id'], 'failed', str(e), document['job_id'])
 
 
 def queue_stage2_if_ready(claim_id):
@@ -301,96 +679,75 @@ def queue_stage2_if_ready(claim_id):
     logger.info('Queued one Stage 2 job for completed claim %s', claim_id)
     return True
 
+
+def queue_next_stage_if_ready(claim_id):
+    """Resume the first missing downstream stage for an OCR-complete claim."""
+    with psycopg.connect(DB_DSN) as conn:
+        with conn.cursor() as cur:
+            cur.execute('''
+                SELECT
+                    EXISTS (
+                        SELECT 1 FROM claim_structured_data csd
+                        WHERE csd.claim_id = %s
+                    ),
+                    EXISTS (
+                        SELECT 1 FROM medical_reports mr
+                        WHERE mr.claim_id = %s
+                    )
+            ''', (claim_id, claim_id))
+            has_structured_data, has_report = cur.fetchone()
+
+    if has_report:
+        return False
+    if not has_structured_data:
+        return queue_stage2_if_ready(claim_id)
+
+    schedule_key = f'queue:stage3_scheduled:{claim_id}'
+    if not r.set(schedule_key, '1', nx=True, ex=21600):
+        return False
+    r.lpush('queue:stage3_report_generation', json.dumps({'claim_id': claim_id}))
+    logger.info('Recovered missing Stage 3 job for claim %s', claim_id)
+    return True
+
 def run_stage1_loop():
-    logger.info('Stage 1 OCR Worker Active - OpenAI primary, AWS Textract fallback')
+    logger.info(
+        'Stage 1 OCR Worker Active - 60s claim debounce, %.2fMB OpenAI batches, Textract fallback',
+        OPENAI_BATCH_MAX_BYTES / 1024 / 1024,
+    )
 
     while True:
         try:
-            raw_task = r.brpop('queue:stage1_ocr_extraction', timeout=30)
-            if not raw_task:
-                continue
+            reconcile_stale_extraction_jobs()
+            tasks = pop_due_claim_tasks()
+            if not tasks:
+                raw_task = r.brpop(STAGE1_QUEUE, timeout=5)
+                if not raw_task:
+                    continue
+                payload = json.loads(raw_task[1])
+                tasks = payload.get('documents') if isinstance(payload, dict) else None
+                if not isinstance(tasks, list):
+                    tasks = [payload]
 
-            task = json.loads(raw_task[1])
-            doc_id = str(task.get('document_id') or '').strip()
-            job_id = str(task.get('job_id') or '').strip() or None
-            force_refresh = bool(task.get('force_refresh', False))
-            if not doc_id:
-                logger.error('Discarding Stage 1 task without document_id: %s', task)
-                continue
+            prepared_documents = []
+            claim_ids = set()
+            for task in tasks:
+                document, claim_id = prepare_document_task(task)
+                if claim_id:
+                    claim_ids.add(claim_id)
+                if document:
+                    prepared_documents.append(document)
 
-            document_state = get_document_state(doc_id)
-            if not document_state:
-                logger.error('Discarding Stage 1 task for missing document %s', doc_id)
-                continue
-
-            claim_id = str(task.get('claim_id') or document_state['claim_id'])
-            s3_bucket, s3_key = normalize_s3_location(
-                task.get('s3_key') or document_state['storage_key'],
-                task.get('s3_bucket') or S3_BUCKET,
+            extraction_groups = group_documents_for_extraction(prepared_documents)
+            logger.info(
+                'Prepared %s documents as %s extraction requests',
+                len(prepared_documents),
+                len(extraction_groups),
             )
-            if not s3_key:
-                error_msg = 'Document storage_key is missing'
-                logger.error('%s for document %s', error_msg, doc_id)
-                update_extraction_job(doc_id, 'failed', error_msg, job_id)
-                continue
+            for document_group in extraction_groups:
+                process_document_group(document_group)
 
-            if document_state['has_extraction'] and not force_refresh:
-                logger.info('Skipping already-extracted document %s', doc_id)
-                update_extraction_job(doc_id, 'succeeded', job_id=job_id)
+            for claim_id in claim_ids:
                 queue_stage2_if_ready(claim_id)
-                continue
-
-            logger.info(f'Processing Document {doc_id} from claim {claim_id}')
-            update_extraction_job(doc_id, 'processing', job_id=job_id)
-
-            try:
-                # Get file size
-                file_size = get_file_size_s3(s3_bucket, s3_key)
-                if file_size is None:
-                    raise Exception(f'Could not determine file size for {s3_key}')
-
-                logger.info(f'File size: {file_size / 1024 / 1024:.2f}MB')
-
-                extracted_text = extract_with_openai_vision(s3_bucket, s3_key, file_size)
-                extraction_model = OPENAI_MODEL
-                if not extracted_text:
-                    logger.info('Falling back to Textract for %s', s3_key)
-                    extracted_text = extract_with_textract(s3_bucket, s3_key)
-                    extraction_model = 'aws_textract'
-                if not extracted_text:
-                    raise Exception('OpenAI and AWS Textract extraction failed')
-
-                # Clean and compress
-                compressed_text = clean_and_compress_ocr(extracted_text)
-                logger.info(f'Extracted {len(extracted_text)} chars, compressed to {len(compressed_text)} chars')
-
-                # Store in database
-                conn = psycopg.connect(DB_DSN)
-                cur = conn.cursor()
-
-                cur.execute('''
-                    INSERT INTO document_extractions (document_id, claim_id, extraction_version, model_name, extracted_entities, raw_response, created_at)
-                    VALUES (%s, %s, %s, %s, %s, %s, NOW())
-                    ON CONFLICT (document_id, extraction_version) DO UPDATE SET
-                        model_name = EXCLUDED.model_name,
-                        raw_response = EXCLUDED.raw_response,
-                        created_at = NOW()
-                ''', (doc_id, claim_id, 'stage1_ocr_v2', extraction_model, '{}', compressed_text))
-
-                cur.execute('UPDATE claim_documents SET parse_status = %s WHERE id = %s', ('succeeded', doc_id))
-                conn.commit()
-                cur.close()
-                conn.close()
-
-                update_extraction_job(doc_id, 'succeeded', job_id=job_id)
-                logger.info(f'Document {doc_id} processing completed')
-
-                queue_stage2_if_ready(claim_id)
-
-            except Exception as e:
-                error_msg = str(e)
-                logger.error(f'Stage 1 Error on Document {doc_id}: {error_msg}', exc_info=True)
-                update_extraction_job(doc_id, 'failed', error_msg, job_id)
 
         except redis.exceptions.TimeoutError:
             continue

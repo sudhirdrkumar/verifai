@@ -2,6 +2,8 @@ from __future__ import annotations
 from typing import Optional
 import logging
 import json
+import os
+import time
 import redis
 from datetime import datetime
 from uuid import UUID, uuid4
@@ -12,6 +14,8 @@ from app.db.session import SessionLocal
 from app.schemas.extraction import ExtractionJobListItem, ExtractionJobListResponse, ExtractionJobResponse, ExtractionJobStatus, ExtractionProvider
 
 logger = logging.getLogger(__name__)
+OCR_QUEUE_DELAY_SECONDS = max(0, int(os.getenv("OCR_QUEUE_DELAY_SECONDS", "60")))
+STAGE1_DELAYED_CLAIMS = "queue:stage1_ocr_extraction:delayed_claims"
 
 # Redis connection
 try:
@@ -93,7 +97,7 @@ class ExtractionQueueService:
             )
             db.commit()
 
-        # Push to Redis queue for stage1-ocr workers
+        # Debounce per claim so all uploaded documents can be processed as size-bounded batches.
         if _redis:
             try:
                 storage_key = doc.get("storage_key", "")
@@ -118,8 +122,21 @@ class ExtractionQueueService:
                 }
                 _redis.delete(f"queue:stage2_scheduled:{doc['claim_id']}")
                 _redis.delete(f"queue:stage3_scheduled:{doc['claim_id']}")
-                _redis.lpush("queue:stage1_ocr_extraction", json.dumps(task))
-                logger.info(f"Pushed job to Redis: {document_id}")
+                claim_id = str(doc["claim_id"])
+                task_key = f"queue:stage1_ocr_extraction:claim:{claim_id}"
+                pipe = _redis.pipeline(transaction=False)
+                pipe.hset(task_key, str(job_id), json.dumps(task))
+                pipe.expire(task_key, 86400)
+                pipe.zadd(
+                    STAGE1_DELAYED_CLAIMS,
+                    {claim_id: time.time() + OCR_QUEUE_DELAY_SECONDS},
+                )
+                pipe.execute()
+                logger.info(
+                    "Queued document %s with %ss claim debounce",
+                    document_id,
+                    OCR_QUEUE_DELAY_SECONDS,
+                )
             except Exception as e:
                 logger.error(f"Failed to push job to Redis: {e}")
 

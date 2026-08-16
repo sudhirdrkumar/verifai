@@ -5,6 +5,9 @@
 set -e
 
 PROJECT_DIR="/home/ec2-user/qc-python"
+STAGE1_INSTANCES="${STAGE1_INSTANCES:-15}"
+STAGE2_INSTANCES="${STAGE2_INSTANCES:-10}"
+STAGE3_INSTANCES="${STAGE3_INSTANCES:-10}"
 cd $PROJECT_DIR
 
 # Activate venv
@@ -17,8 +20,8 @@ pip install -r backend/requirements.txt
 npm install -g pm2 || true
 
 # Stop existing workers
-pm2 stop stage1-ocr stage2-reducer 2>/dev/null || true
-pm2 delete stage1-ocr stage2-reducer 2>/dev/null || true
+pm2 stop stage1-ocr stage2-reducer stage3-report 2>/dev/null || true
+pm2 delete stage1-ocr stage2-reducer stage3-report 2>/dev/null || true
 
 # Start Redis (if not running)
 if ! pgrep -x "redis-server" > /dev/null; then
@@ -27,13 +30,17 @@ if ! pgrep -x "redis-server" > /dev/null; then
     sleep 2
 fi
 
-# Start Stage 1 workers (3 instances for parallel OCR)
+# Start Stage 1 workers
 echo "Starting Stage 1 OCR workers..."
-pm2 start backend/stage1_ocr_worker.py -i 3 --name "stage1-ocr" --interpreter python
+pm2 start backend/stage1_ocr_worker.py -i "$STAGE1_INSTANCES" --name "stage1-ocr" --interpreter "$PROJECT_DIR/.venv/bin/python"
 
-# Start Stage 2 reducer (1 instance)
+# Start Stage 2 reducers
 echo "Starting Stage 2 Reducer..."
-pm2 start backend/stage2_reduction_worker.py -i 1 --name "stage2-reducer" --interpreter python
+pm2 start backend/stage2_reduction_worker.py -i "$STAGE2_INSTANCES" --name "stage2-reducer" --interpreter "$PROJECT_DIR/.venv/bin/python"
+
+# Start Stage 3 report workers
+echo "Starting Stage 3 Report workers..."
+pm2 start backend/stage3_report_worker.py -i "$STAGE3_INSTANCES" --name "stage3-report" --interpreter "$PROJECT_DIR/.venv/bin/python"
 
 # Restart FastAPI backend
 echo "Restarting FastAPI backend..."

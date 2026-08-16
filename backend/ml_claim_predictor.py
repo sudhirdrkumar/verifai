@@ -6,8 +6,6 @@ Uses trained model to predict claim decisions with confidence scores
 
 import os
 import logging
-import pandas as pd
-from ml_claim_classifier import ClaimClassifier
 
 logger = logging.getLogger(__name__)
 
@@ -23,11 +21,17 @@ class ClaimPredictor:
     """Predict claim recommendations using ML model"""
 
     def __init__(self, model_path='ml_models/claim_classifier.pkl'):
-        self.classifier = ClaimClassifier(model_path)
+        self.classifier = None
+        self._pandas = None
         self.model_available = os.path.exists(model_path)
 
         if self.model_available:
             try:
+                import pandas as pd
+                from ml_claim_classifier import ClaimClassifier
+
+                self._pandas = pd
+                self.classifier = ClaimClassifier(model_path)
                 self.classifier.load()
                 logger.info('✅ ML model loaded successfully')
             except Exception as e:
@@ -123,7 +127,7 @@ class ClaimPredictor:
             features = self.extract_features(structured_json)
 
             # Create DataFrame for prediction
-            X = pd.DataFrame([features])
+            X = self._pandas.DataFrame([features])
 
             # Ensure feature order matches training
             expected_features = self.classifier.feature_names
