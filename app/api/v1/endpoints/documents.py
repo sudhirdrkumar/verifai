@@ -42,6 +42,8 @@ from app.services.documents_service import (
     _claim_exists,
     _sanitize_filename,
 )
+from app.services.extraction_queue_service import ExtractionQueueService
+from app.schemas.extraction import ExtractionProvider
 from app.services.storage_service import StorageConfigError, StorageOperationError, generate_upload_url, upload_bytes
 from app.core.config import settings
 
@@ -107,17 +109,14 @@ async def upload_document_endpoint(
     current_user: AuthenticatedUser = Depends(require_roles(UserRole.super_admin, UserRole.user)),
     db: Session = Depends(get_db),
 ) -> DocumentResponse:
-    """Direct S3 upload - stream file directly to S3, no memory buffering"""
+    """Upload document and auto-queue for extraction"""
     if not file.filename:
         raise HTTPException(status_code=400, detail="filename required")
 
     try:
-        from datetime import datetime
-        safe_name = _sanitize_filename(file.filename)
-        object_key = f"claims/{claim_id}/documents/{uuid4().hex}_{safe_name}"
-        logger.info(f"Upload started: claim={claim_id}, file={safe_name}")
+        logger.info(f"Upload started: claim={claim_id}, file={file.filename}")
 
-        # Stream directly to S3 (NO buffering entire file in memory)
+        # Read file (stream in chunks to avoid memory issues)
         total_bytes = 0
         chunks = []
         max_chunk_size = 1024 * 1024 * 5  # 5MB chunks
@@ -135,53 +134,38 @@ async def upload_document_endpoint(
         logger.info(f"Read {total_bytes} bytes for claim {claim_id}")
 
         payload = b''.join(chunks)
-        logger.info(f"Uploading to S3: {object_key}")
-        upload_result = upload_bytes(
-            object_key=object_key,
-            payload=payload,
-            content_type=file.content_type or "application/octet-stream"
-        )
-        logger.info(f"S3 upload successful: {object_key} → {upload_result.get('url')}")
 
-        # INSERT directly into database
-        doc_id = uuid4()
-        logger.info(f"Inserting document into DB for claim {claim_id}")
-        db.execute(
-            text("""
-                INSERT INTO claim_documents
-                (id, claim_id, file_name, file_size_bytes, mime_type, storage_key,
-                 retention_class, uploaded_by, uploaded_at, parse_status, metadata)
-                VALUES (:id, :claim_id, :file_name, :file_size, :mime_type, :storage_key,
-                        :retention_class, :uploaded_by, :uploaded_at, :parse_status, :metadata)
-            """),
-            {
-                "id": str(doc_id),
-                "claim_id": str(claim_id),
-                "file_name": safe_name,
-                "file_size": total_bytes,
-                "mime_type": file.content_type or "application/octet-stream",
-                "storage_key": object_key,
-                "retention_class": retention_class,
-                "uploaded_by": uploaded_by or current_user.username,
-                "uploaded_at": datetime.utcnow(),
-                "parse_status": "pending",
-                "metadata": json.dumps({"s3_url": upload_result.get("url")})
-            }
+        # Use the service function (handles S3 upload, DB insert, and workflow events)
+        document = create_document(
+            db=db,
+            claim_id=claim_id,
+            file_name=file.filename,
+            mime_type=file.content_type or "application/octet-stream",
+            file_bytes=payload,
+            uploaded_by=uploaded_by or current_user.username,
+            retention_class=retention_class,
         )
-        db.commit()
-        logger.info(f"✅ Document {doc_id} created in DB for claim {claim_id}")
+        logger.info(f"✅ Document {document.id} created for claim {claim_id}")
 
-        return DocumentResponse(
-            id=doc_id, claim_id=claim_id, file_name=safe_name,
-            file_size_bytes=total_bytes, mime_type=file.content_type or "application/octet-stream",
-            storage_key=object_key, checksum_sha256=None, parse_status="pending",
-            page_count=None, retention_class=retention_class,
-            uploaded_by=uploaded_by or current_user.username, uploaded_at=datetime.utcnow(),
-            parsed_at=None, metadata={"s3_url": upload_result.get("url")}
-        )
+        # AUTO-QUEUE for extraction
+        try:
+            queue_service = ExtractionQueueService()
+            queue_service.enqueue(
+                document_id=document.id,
+                provider=ExtractionProvider.textract,
+                actor_id=uploaded_by or current_user.username,
+                force_refresh=False,
+            )
+            logger.info(f"✅ Queued document {document.id} for Stage 1 extraction")
+        except Exception as queue_err:
+            logger.warning(f"Failed to queue document {document.id}: {queue_err}")
+
+        return document
 
     except HTTPException:
         raise
+    except ClaimNotFoundError:
+        raise HTTPException(status_code=404, detail="claim not found") from None
     except Exception as exc:
         logger.error(f"❌ Upload error for claim {claim_id}: {type(exc).__name__}: {exc}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"upload error: {str(exc)}") from exc
