@@ -147,16 +147,16 @@ async def upload_document_endpoint(
         )
         logger.info(f"✅ Document {document.id} created for claim {claim_id}")
 
-        # AUTO-QUEUE for extraction
+        # AUTO-QUEUE for extraction (OpenAI Vision primary)
         try:
             queue_service = ExtractionQueueService()
             queue_service.enqueue(
                 document_id=document.id,
-                provider=ExtractionProvider.textract,
+                provider=ExtractionProvider.openai,
                 actor_id=uploaded_by or current_user.username,
                 force_refresh=False,
             )
-            logger.info(f"✅ Queued document {document.id} for Stage 1 extraction")
+            logger.info(f"✅ Queued document {document.id} for Stage 1 OCR (OpenAI Vision)")
         except Exception as queue_err:
             logger.warning(f"Failed to queue document {document.id}: {queue_err}")
 
