@@ -126,53 +126,64 @@ medical documents. Doctor review is required before final approval.
 {'='*70}
         """.strip()
 
-        # Convert to HTML for display (comprehensive format)
-        html_report = f"""<div data-report-standardized="1" style="font-family: Arial, Helvetica, sans-serif; font-size: 14px; line-height: 1.45;">
-<style data-report-standardized-style="1">[data-report-standardized="1"],[data-report-standardized="1"] *{{font-family:Arial, Helvetica, sans-serif !important;font-size:14px !important;line-height:1.45 !important;}}
-.title{{font-size:18px;font-weight:bold;margin:20px 0;}}
-.meta{{color:#666;font-size:12px;margin:10px 0;}}
-.t{{width:100%;border-collapse:collapse;margin:15px 0;}}
-.t th{{background:#f0f0f0;padding:8px;text-align:left;font-weight:bold;border:1px solid #ddd;}}
-.t td{{padding:8px;border:1px solid #ddd;}}
-.sec{{background:#f5f5f5;padding:10px;margin:15px 0;font-weight:bold;}}
-</style>
-<h1 class="title">HEALTH CLAIM ASSESSMENT SHEET</h1>
-<div class="meta">Generated: {datetime.now().strftime('%m/%d/%Y, %I:%M:%S %p')} | Report Type: AI-Generated ({GEMINI_MODEL})</div>
+        # Convert to HTML in HEALTH CLAIM ASSESSMENT SHEET format
+        doctor_name = structured_json.get('doctor_name', 'System Auto-Generated')
+        admission_date = structured_json.get('doa', '-')
+        discharge_date = structured_json.get('dod', '-')
 
-<table class="t">
-<tbody>
-<tr><th>FACILITY</th><td>{structured_data['hospital_name']}</td></tr>
-<tr><th>TREATING DOCTOR</th><td>{structured_data['treating_doctor']}</td></tr>
-<tr><th>DIAGNOSIS</th><td><strong>{structured_data['diagnosis']}</strong></td></tr>
-<tr><th>CHIEF COMPLAINTS</th><td>{structured_data['complaints']}</td></tr>
-<tr><th>CLAIMED AMOUNT</th><td>{structured_data['claim_amount']}</td></tr>
+        html_report = f"""<div style="font-family: Arial, Helvetica, sans-serif; font-size: 14px; line-height: 1.45; padding: 20px;">
+<h1 style="text-align: center; font-size: 18px; font-weight: bold; margin: 20px 0;">HEALTH CLAIM ASSESSMENT SHEET</h1>
+<div style="text-align: center; color: #666; font-size: 12px; margin: 10px 0;">Generated: {datetime.now().strftime('%m/%d/%Y, %I:%M:%S %p')} | Doctor: {doctor_name}</div>
+
+<table style="width: 100%; border-collapse: collapse; margin: 20px 0;">
+<tbody style="background-color: #f5f0f0;">
+<tr style="background-color: #f5f0f0;"><td style="padding: 8px; border: 1px solid #999; font-weight: bold; width: 40%;">COMPANY NAME</td><td style="padding: 8px; border: 1px solid #999;">Medi Assist Insurance TPA Pvt. Ltd.</td></tr>
+<tr><td style="padding: 8px; border: 1px solid #999; font-weight: bold;">CLAIM NO.</td><td style="padding: 8px; border: 1px solid #999;">-</td></tr>
+<tr style="background-color: #f5f0f0;"><td style="padding: 8px; border: 1px solid #999; font-weight: bold;">CLAIM TYPE</td><td style="padding: 8px; border: 1px solid #999;">Cashless</td></tr>
+<tr><td style="padding: 8px; border: 1px solid #999; font-weight: bold;">INSURED</td><td style="padding: 8px; border: 1px solid #999;">-</td></tr>
+<tr style="background-color: #f5f0f0;"><td style="padding: 8px; border: 1px solid #999; font-weight: bold;">HOSPITAL</td><td style="padding: 8px; border: 1px solid #999;">{structured_data['hospital_name']}</td></tr>
+<tr><td style="padding: 8px; border: 1px solid #999; font-weight: bold;">TREATING DOCTOR</td><td style="padding: 8px; border: 1px solid #999;">{structured_data['treating_doctor']}</td></tr>
+<tr style="background-color: #f5f0f0;"><td style="padding: 8px; border: 1px solid #999; font-weight: bold;">TREATING DOCTOR REGISTRATION NUMBER</td><td style="padding: 8px; border: 1px solid #999;">-</td></tr>
+<tr><td style="padding: 8px; border: 1px solid #999; font-weight: bold;">ADMISSION</td><td style="padding: 8px; border: 1px solid #999;">{admission_date}</td></tr>
+<tr style="background-color: #f5f0f0;"><td style="padding: 8px; border: 1px solid #999; font-weight: bold;">DISCHARGE</td><td style="padding: 8px; border: 1px solid #999;">{discharge_date}</td></tr>
+<tr><td style="padding: 8px; border: 1px solid #999; font-weight: bold;">DIAGNOSIS</td><td style="padding: 8px; border: 1px solid #999;"><strong>{structured_data['diagnosis']}</strong></td></tr>
+<tr style="background-color: #f5f0f0;"><td style="padding: 8px; border: 1px solid #999; font-weight: bold;">CHIEF COMPLAINTS AT ADMISSION</td><td style="padding: 8px; border: 1px solid #999;">{structured_data['complaints']}</td></tr>
+<tr><td style="padding: 8px; border: 1px solid #999; font-weight: bold;">CLAIMED AMOUNT</td><td style="padding: 8px; border: 1px solid #999;">{structured_data['claim_amount']}</td></tr>
 </tbody>
 </table>
 
-<div class="sec">CLINICAL FINDINGS</div>
-<table class="t">
+<div style="background-color: #f5f5f5; padding: 10px; margin: 15px 0; font-weight: bold;">CLINICAL FINDINGS</div>
+<table style="width: 100%; border-collapse: collapse; margin: 10px 0;">
 <tbody>
-<tr><td>Available clinical summary: Diagnosis: {structured_data['diagnosis']}.</td></tr>
+<tr><td style="padding: 8px; border: 1px solid #ddd;">{structured_data.get('findings', 'Clinical findings not available')}</td></tr>
 </tbody>
 </table>
 
-<div class="sec">MEDICINES USED</div>
-<table class="t">
+<div style="background-color: #f5f5f5; padding: 10px; margin: 15px 0; font-weight: bold;">INVESTIGATION REPORTS</div>
+<table style="width: 100%; border-collapse: collapse; margin: 10px 0;">
 <tbody>
-<tr><td>{structured_data['medicine_used']}</td></tr>
+<tr><td style="padding: 8px; border: 1px solid #ddd;">{structured_data.get('investigation_finding_in_details', 'Investigation reports not available')}</td></tr>
 </tbody>
 </table>
 
-<div class="sec">CONCLUSION AND RECOMMENDATION</div>
-<table class="t">
+<div style="background-color: #f5f5f5; padding: 10px; margin: 15px 0; font-weight: bold;">MEDICINES USED</div>
+<table style="width: 100%; border-collapse: collapse; margin: 10px 0;">
 <tbody>
-<tr><th>Conclusion</th><td>{structured_data['conclusion']}</td></tr>
-<tr><th>Recommendation</th><td>{structured_json.get('recommendation', 'UNDER REVIEW')}</td></tr>
+<tr><td style="padding: 8px; border: 1px solid #ddd;">{structured_data['medicine_used']}</td></tr>
+</tbody>
+</table>
+
+<div style="background-color: #f5f5f5; padding: 10px; margin: 15px 0; font-weight: bold;">CONCLUSION AND RECOMMENDATION</div>
+<table style="width: 100%; border-collapse: collapse; margin: 10px 0;">
+<tbody>
+<tr style="background-color: #f5f0f0;"><td style="padding: 8px; border: 1px solid #999; font-weight: bold; width: 30%;">Final Recommendation</td><td style="padding: 8px; border: 1px solid #999;">{structured_json.get('recommendation', 'QUERY')}</td></tr>
+<tr><td style="padding: 8px; border: 1px solid #999; font-weight: bold; vertical-align: top;">Conclusion</td><td style="padding: 8px; border: 1px solid #999;">{structured_data['conclusion']}</td></tr>
+<tr style="background-color: #f5f0f0;"><td style="padding: 8px; border: 1px solid #999; font-weight: bold;">Recommendation</td><td style="padding: 8px; border: 1px solid #999;">{structured_json.get('recommendation', 'QUERY')}</td></tr>
 </tbody>
 </table>
 
 <hr style="margin-top: 20px;">
-<p style="font-size: 12px; color: #666;">Note: This report was auto-generated using AI analysis of OCR-extracted medical documents. Doctor review is required before final approval.</p>
+<p style="font-size: 11px; color: #666;">Note: This report was auto-generated using AI analysis of OCR-extracted medical documents. Doctor review is required before final approval.</p>
 </div>"""
 
         # Insert report into database
