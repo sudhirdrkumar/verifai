@@ -95,7 +95,7 @@ def reconcile(*, apply: bool) -> dict[str, object]:
                 "s3_bucket": bucket,
                 "s3_key": key,
             }
-            if has_extraction or str(parse_status).lower() == "succeeded":
+            if has_extraction:
                 completed.append(item)
             elif key:
                 pending.append(item)
