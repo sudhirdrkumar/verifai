@@ -51,6 +51,7 @@ def reconcile(*, apply: bool) -> dict[str, object]:
                         SELECT 1
                         FROM document_extractions de
                         WHERE de.document_id = cd.id
+                        AND COALESCE(de.raw_response, '') <> ''
                     ) AS has_extraction
                 FROM claim_documents cd
                 JOIN extraction_jobs ej ON ej.document_id = cd.id
