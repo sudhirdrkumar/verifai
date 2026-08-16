@@ -126,30 +126,50 @@ medical documents. Doctor review is required before final approval.
 {'='*70}
         """.strip()
 
-        # Convert to HTML for display
-        html_report = f"""<h1 class="title">MEDICAL CLAIM REPORT - AUTO GENERATED</h1>
+        # Convert to HTML for display (comprehensive format)
+        html_report = f"""<div data-report-standardized="1" style="font-family: Arial, Helvetica, sans-serif; font-size: 14px; line-height: 1.45;">
+<style data-report-standardized-style="1">[data-report-standardized="1"],[data-report-standardized="1"] *{{font-family:Arial, Helvetica, sans-serif !important;font-size:14px !important;line-height:1.45 !important;}}
+.title{{font-size:18px;font-weight:bold;margin:20px 0;}}
+.meta{{color:#666;font-size:12px;margin:10px 0;}}
+.t{{width:100%;border-collapse:collapse;margin:15px 0;}}
+.t th{{background:#f0f0f0;padding:8px;text-align:left;font-weight:bold;border:1px solid #ddd;}}
+.t td{{padding:8px;border:1px solid #ddd;}}
+.sec{{background:#f5f5f5;padding:10px;margin:15px 0;font-weight:bold;}}
+</style>
+<h1 class="title">HEALTH CLAIM ASSESSMENT SHEET</h1>
 <div class="meta">Generated: {datetime.now().strftime('%m/%d/%Y, %I:%M:%S %p')} | Report Type: AI-Generated ({GEMINI_MODEL})</div>
-<div class="content">
-<h2>FACILITY & PROVIDER INFORMATION</h2>
-<table style="width: 100%; border-collapse: collapse;">
-<tr><td style="padding: 5px;"><b>Hospital:</b></td><td style="padding: 5px;">{structured_data['hospital_name']}</td></tr>
-<tr><td style="padding: 5px;"><b>Treating Doctor:</b></td><td style="padding: 5px;">{structured_data['treating_doctor']}</td></tr>
+
+<table class="t">
+<tbody>
+<tr><th>FACILITY</th><td>{structured_data['hospital_name']}</td></tr>
+<tr><th>TREATING DOCTOR</th><td>{structured_data['treating_doctor']}</td></tr>
+<tr><th>DIAGNOSIS</th><td><strong>{structured_data['diagnosis']}</strong></td></tr>
+<tr><th>CHIEF COMPLAINTS</th><td>{structured_data['complaints']}</td></tr>
+<tr><th>CLAIMED AMOUNT</th><td>{structured_data['claim_amount']}</td></tr>
+</tbody>
 </table>
 
-<h2>CLINICAL DETAILS</h2>
-<table style="width: 100%; border-collapse: collapse;">
-<tr><td style="padding: 5px;"><b>Diagnosis:</b></td><td style="padding: 5px;">{structured_data['diagnosis']}</td></tr>
-<tr><td style="padding: 5px;"><b>Complaints:</b></td><td style="padding: 5px;">{structured_data['complaints']}</td></tr>
-<tr><td style="padding: 5px;"><b>Medications:</b></td><td style="padding: 5px;">{structured_data['medicine_used']}</td></tr>
+<div class="sec">CLINICAL FINDINGS</div>
+<table class="t">
+<tbody>
+<tr><td>Available clinical summary: Diagnosis: {structured_data['diagnosis']}.</td></tr>
+</tbody>
 </table>
 
-<h2>CLAIM DETAILS</h2>
-<table style="width: 100%; border-collapse: collapse;">
-<tr><td style="padding: 5px;"><b>Claim Amount:</b></td><td style="padding: 5px;">₹{structured_data['claim_amount']}</td></tr>
+<div class="sec">MEDICINES USED</div>
+<table class="t">
+<tbody>
+<tr><td>{structured_data['medicine_used']}</td></tr>
+</tbody>
 </table>
 
-<h2>CONCLUSION</h2>
-<p>{structured_data['conclusion']}</p>
+<div class="sec">CONCLUSION AND RECOMMENDATION</div>
+<table class="t">
+<tbody>
+<tr><th>Conclusion</th><td>{structured_data['conclusion']}</td></tr>
+<tr><th>Recommendation</th><td>{structured_json.get('recommendation', 'UNDER REVIEW')}</td></tr>
+</tbody>
+</table>
 
 <hr style="margin-top: 20px;">
 <p style="font-size: 12px; color: #666;">Note: This report was auto-generated using AI analysis of OCR-extracted medical documents. Doctor review is required before final approval.</p>
@@ -248,6 +268,12 @@ def run_stage2_loop():
 
                 ocr_text = '\n\n'.join(combined_texts)
                 logger.info(f'Combined OCR from {len(ocr_rows)} documents: {len(ocr_text)} chars for claim {claim_id}')
+
+                if not ocr_text.strip():
+                    logger.warning(f'Skipping claim {claim_id}: extracted rows contain no OCR text')
+                    cur.close()
+                    conn.close()
+                    continue
 
                 # Extract structured data with Gemini
                 structured_json = extract_structured_data_gemini(ocr_text, claim_id)
