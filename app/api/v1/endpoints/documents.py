@@ -115,6 +115,7 @@ async def upload_document_endpoint(
         from datetime import datetime
         safe_name = _sanitize_filename(file.filename)
         object_key = f"claims/{claim_id}/documents/{uuid4().hex}_{safe_name}"
+        logger.info(f"Upload started: claim={claim_id}, file={safe_name}")
 
         # Stream directly to S3 (NO buffering entire file in memory)
         total_bytes = 0
@@ -131,15 +132,20 @@ async def upload_document_endpoint(
         if total_bytes == 0:
             raise HTTPException(status_code=400, detail="empty file upload")
 
+        logger.info(f"Read {total_bytes} bytes for claim {claim_id}")
+
         payload = b''.join(chunks)
+        logger.info(f"Uploading to S3: {object_key}")
         upload_result = upload_bytes(
             object_key=object_key,
             payload=payload,
             content_type=file.content_type or "application/octet-stream"
         )
+        logger.info(f"S3 upload successful: {object_key} → {upload_result.get('url')}")
 
         # INSERT directly into database
         doc_id = uuid4()
+        logger.info(f"Inserting document into DB for claim {claim_id}")
         db.execute(
             text("""
                 INSERT INTO claim_documents
@@ -163,6 +169,7 @@ async def upload_document_endpoint(
             }
         )
         db.commit()
+        logger.info(f"✅ Document {doc_id} created in DB for claim {claim_id}")
 
         return DocumentResponse(
             id=doc_id, claim_id=claim_id, file_name=safe_name,
@@ -176,7 +183,7 @@ async def upload_document_endpoint(
     except HTTPException:
         raise
     except Exception as exc:
-        logger.error(f"Upload error for claim {claim_id}: {type(exc).__name__}: {exc}", exc_info=True)
+        logger.error(f"❌ Upload error for claim {claim_id}: {type(exc).__name__}: {exc}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"upload error: {str(exc)}") from exc
 
 
