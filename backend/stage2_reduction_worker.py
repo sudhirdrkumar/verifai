@@ -1,5 +1,7 @@
 import os
 import json
+import re
+import time
 import redis
 import psycopg
 import logging
@@ -12,6 +14,9 @@ import sys
 from pathlib import Path
 env_path = Path(__file__).parent.parent / '.env'
 load_dotenv(env_path)
+
+# Import ML predictor
+from ml_claim_predictor import predict_claim
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -27,6 +32,93 @@ if not GEMINI_API_KEY:
 
 genai.configure(api_key=GEMINI_API_KEY)
 r = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, decode_responses=True, socket_keepalive=True)
+STAGE2_QUEUE = 'queue:stage2_claim_reduction'
+STAGE2_RETRY_SET = 'queue:stage2_claim_reduction:retries'
+STAGE2_RETRY_PAYLOADS = 'queue:stage2_claim_reduction:retry_payloads'
+STAGE2_RETRY_BASE_SECONDS = int(os.getenv('STAGE2_RETRY_BASE_SECONDS', '300'))
+STAGE2_RETRY_MAX_SECONDS = int(os.getenv('STAGE2_RETRY_MAX_SECONDS', '3600'))
+GEMINI_CREDIT_CIRCUIT_KEY = 'circuit:gemini:credit_depleted'
+GEMINI_CREDIT_PAUSE_SECONDS = int(os.getenv('GEMINI_CREDIT_PAUSE_SECONDS', '1800'))
+GEMINI_REQUESTS_PER_MINUTE = int(os.getenv('GEMINI_REQUESTS_PER_MINUTE', '30'))
+
+
+class GeminiCreditPausedError(RuntimeError):
+    pass
+
+
+class GeminiRateLimitPausedError(RuntimeError):
+    pass
+
+
+def reserve_gemini_request() -> None:
+    credit_pause_ttl = r.ttl(GEMINI_CREDIT_CIRCUIT_KEY)
+    if credit_pause_ttl > 0:
+        raise GeminiCreditPausedError(
+            f'Gemini credit circuit is open; retry available in {credit_pause_ttl}s'
+        )
+
+    minute_bucket = int(time.time() // 60)
+    rate_key = f'rate:gemini:stage2:{minute_bucket}'
+    request_count = r.incr(rate_key)
+    if request_count == 1:
+        r.expire(rate_key, 120)
+    if request_count > GEMINI_REQUESTS_PER_MINUTE:
+        raise GeminiRateLimitPausedError(
+            f'Gemini Stage 2 rate limit reached ({GEMINI_REQUESTS_PER_MINUTE}/minute)'
+        )
+
+
+def open_gemini_credit_circuit(error: Exception) -> None:
+    r.setex(
+        GEMINI_CREDIT_CIRCUIT_KEY,
+        GEMINI_CREDIT_PAUSE_SECONDS,
+        str(error)[:500],
+    )
+    logger.error(
+        'Gemini credit circuit opened for %ss after billing failure',
+        GEMINI_CREDIT_PAUSE_SECONDS,
+    )
+
+
+def schedule_stage2_retry(task: dict, error: Exception) -> None:
+    claim_id = str(task.get('claim_id') or '').strip()
+    if not claim_id:
+        logger.error('Cannot retry Stage 2 task without claim_id: %s', task)
+        return
+
+    attempt = max(int(task.get('attempt') or 0) + 1, 1)
+    delay = min(STAGE2_RETRY_BASE_SECONDS * (2 ** min(attempt - 1, 4)), STAGE2_RETRY_MAX_SECONDS)
+    retry_task = dict(task)
+    retry_task.update({
+        'claim_id': claim_id,
+        'attempt': attempt,
+        'last_error': str(error)[:500],
+    })
+    payload = json.dumps(retry_task)
+    due_at = time.time() + delay
+    pipe = r.pipeline(transaction=False)
+    pipe.hset(STAGE2_RETRY_PAYLOADS, claim_id, payload)
+    pipe.zadd(STAGE2_RETRY_SET, {claim_id: due_at})
+    pipe.execute()
+    logger.warning('Stage 2 retry %s scheduled for claim %s in %ss', attempt, claim_id, delay)
+
+
+def promote_due_stage2_retries(limit: int = 20) -> int:
+    promoted = 0
+    for claim_id in r.zrangebyscore(STAGE2_RETRY_SET, 0, time.time(), start=0, num=limit):
+        schedule_key = f'queue:stage2_scheduled:{claim_id}'
+        if not r.set(schedule_key, '1', nx=True, ex=21600):
+            continue
+        payload = r.hget(STAGE2_RETRY_PAYLOADS, claim_id)
+        if not payload or not r.zrem(STAGE2_RETRY_SET, claim_id):
+            r.delete(schedule_key)
+            continue
+        r.hdel(STAGE2_RETRY_PAYLOADS, claim_id)
+        r.lpush(STAGE2_QUEUE, payload)
+        promoted += 1
+    if promoted:
+        logger.info('Promoted %s delayed Stage 2 retries', promoted)
+    return promoted
 
 
 def report_field_text(value) -> str:
@@ -55,6 +147,8 @@ def normalize_structured_json(data: dict) -> dict:
         'daily_tpr_chart_min_max': ('daily_tpr_chart',),
         'high_end_antibiotic_for_rejection': ('high_end_antibiotics',),
         'claim_amount': ('claimed_amount',),
+        'clinical_course_and_discharge_condition': ('clinical_course', 'discharge_condition', 'outcome'),
+        'procedure_or_surgery': ('procedure', 'surgery', 'procedure_performed', 'treatment_procedure'),
     }
     for target, source_keys in aliases.items():
         if report_field_text(normalized.get(target)) not in ('', '-'):
@@ -123,8 +217,12 @@ REQUIRED JSON - EXTRACT ALL SECTIONS:
   "high_end_antibiotic_for_rejection": "meropenem/linezolid/vancomycin/ciprofloxacin/etc if present",
   "investigation_finding_in_details": "Complete lab report with ALL values - CBC (Hemoglobin, WBC, Platelets, RBC, Hematocrit), LFT (Bilirubin, Albumin, AST, ALT, ALP), RFT (Creatinine, BUN), imaging findings with details",
   "claim_amount": "claimed amount",
-  "conclusion": "detailed clinical conclusion with clinical reasoning",
-  "recommendation": "APPROVE/REJECT/QUERY with justification"
+  "procedure_or_surgery": "exact procedure/surgery performed, or '-' when none is documented",
+  "clinical_course_and_discharge_condition": "response to treatment, improvement/deterioration, and condition at discharge; do not invent",
+  "admission_required": "Justified/Not Justified/Query",
+  "conclusion": "100-160 word medico-legal conclusion. Include presenting complaints and duration, diagnosis, objective clinical findings, specific abnormal or diagnosis-supporting investigations, conservative treatment with key medicines/antibiotics or exact surgery, documented response/discharge condition, medical necessity of admission, and a final admissibility statement aligned with recommendation. Use only documented facts; explicitly identify material evidence gaps instead of inventing facts.",
+  "recommendation": "exactly one of APPROVE, REJECT, QUERY",
+  "query_reason": "specific missing evidence when recommendation is QUERY, otherwise empty"
 }}
 
 OCR TEXT ({len(ocr_text)} chars):
@@ -133,6 +231,7 @@ OCR TEXT ({len(ocr_text)} chars):
 CRITICAL: Extract actual investigation VALUES, not generic summaries. Include units, reference ranges, and abnormal flags.
 Return ONLY the JSON object, nothing else.'''
 
+        reserve_gemini_request()
         model = genai.GenerativeModel(GEMINI_MODEL)
         response = model.generate_content(prompt)
 
@@ -152,56 +251,159 @@ Return ONLY the JSON object, nothing else.'''
     except json.JSONDecodeError as e:
         logger.error(f'Failed to parse Gemini JSON response: {e}')
         logger.error(f'Response was: {response_text[:200]}')
-        return {}
+        raise
+    except (GeminiCreditPausedError, GeminiRateLimitPausedError):
+        raise
     except Exception as e:
+        error_text = str(e).lower()
+        if 'prepayment credits are depleted' in error_text or 'billing#prepay' in error_text:
+            open_gemini_credit_circuit(e)
         logger.error(f'Gemini extraction failed: {e}', exc_info=True)
-        return {}
+        raise
+
+def _conclusion_value(structured_json: dict, *keys: str) -> str:
+    for key in keys:
+        raw_value = report_field_text(structured_json.get(key))
+        value = re.sub(r'\s*\n\s*', '; ', raw_value)
+        value = re.sub(r'[ \t]+', ' ', value).strip(' -;,.')
+        if not value:
+            continue
+        if value.lower() in {'none', 'nil', 'null', 'not available', 'not documented', 'unknown'}:
+            continue
+        return value
+    return ''
+
+
+def _has_specific_investigation(value: str) -> bool:
+    text = str(value or '').strip()
+    if not text:
+        return False
+    return not re.search(
+        r'^(?:no (?:deranged )?investigation(?: values?)?(?: (?:were )?found| available)?|no significant abnormality|relevant investigations? (?:were )?done|investigations? done)[\s.]*$',
+        text,
+        re.IGNORECASE,
+    )
+
 
 def generate_medical_legal_conclusion(structured_json: dict) -> str:
-    """Generate professional medico-legal conclusion based on clinical evidence."""
-    try:
-        diagnosis = structured_json.get('diagnosis', 'unspecified diagnosis').strip()
-        chief_complaints = structured_json.get('chief_complaints', 'unspecified complaints').strip()
-        investigations = structured_json.get('deranged_investigation', '').strip()
-        medicines = structured_json.get('medicine_used', '').strip()
-        clinical_findings = structured_json.get('clinical_findings', '').strip()
-        recommendation = structured_json.get('recommendation', 'QUERY').strip().upper()
+    """Build a decision-aligned conclusion from the single-pass Gemini structure."""
+    diagnosis = _conclusion_value(structured_json, 'diagnosis') or 'the documented diagnosis'
+    complaints = _conclusion_value(
+        structured_json,
+        'complaints',
+        'chief_complaints',
+        'chief_complaints_at_admission',
+    ) or 'the documented presenting complaints'
+    findings = _conclusion_value(
+        structured_json,
+        'major_diagnostic_finding',
+        'major_diagnostic_findings',
+        'findings',
+        'clinical_findings',
+    )
+    deranged = _conclusion_value(structured_json, 'deranged_investigation')
+    investigations = _conclusion_value(
+        structured_json,
+        'investigation_finding_in_details',
+        'all_investigation_reports',
+        'investigation_reports',
+    )
+    medicines = _conclusion_value(structured_json, 'medicine_used', 'medicines', 'treatment_medicines')
+    procedure = _conclusion_value(
+        structured_json,
+        'procedure_or_surgery',
+        'procedure',
+        'surgery',
+        'procedure_performed',
+    )
+    clinical_course = _conclusion_value(
+        structured_json,
+        'clinical_course_and_discharge_condition',
+        'clinical_course',
+        'discharge_condition',
+        'outcome',
+    )
+    query_reason = _conclusion_value(structured_json, 'query_reason')
+    recommendation_raw = _conclusion_value(structured_json, 'recommendation', 'final_recommendation').upper()
+    if any(token in recommendation_raw for token in ('REJECT', 'INADMISSIBLE', 'NOT JUSTIFIED')):
+        recommendation = 'REJECT'
+    elif any(token in recommendation_raw for token in ('APPROVE', 'ADMISSIBLE', 'JUSTIFIED')):
+        recommendation = 'APPROVE'
+    else:
+        recommendation = 'QUERY'
 
-        # Determine treatment type (conservative vs surgical)
-        treatment_type = 'conservatively' if not any(surgical in medicines.lower() for surgical in ['surgery', 'orif', 'fixation', 'repair', 'ligation']) else 'surgically'
+    sentences = [
+        f"Based on the available medical records, the patient presented with {complaints} and was diagnosed with {diagnosis}."
+    ]
+    if findings:
+        sentences.append(f"Objective clinical findings included {findings}.")
+    if _has_specific_investigation(deranged):
+        sentences.append(f"The relevant abnormal investigation findings were {deranged}.")
+    elif _has_specific_investigation(investigations):
+        sentences.append(f"The documented investigations included {investigations}.")
 
-        # Extract key medicines (especially antibiotics and high-end drugs)
-        medicine_list = medicines.replace(',', ' ').split() if medicines else []
-        antibiotics = [m.strip() for m in medicine_list if any(ab in m.lower() for ab in ['antibiotic', 'cef', 'meropenem', 'azithromycin', 'linezolid', 'vancomycin'])][:3]
-        antibiotic_str = ', '.join(antibiotics) if antibiotics else 'supportive treatment'
+    surgical_text = ' '.join((procedure, medicines)).lower()
+    is_surgical = bool(re.search(
+        r'\b(?:surgery|surgical|procedure|operation|operative|orif|fixation|repair|ligation|lscs|caesarean|excision|appendectomy)\b',
+        surgical_text,
+    ))
+    if is_surgical and procedure:
+        treatment_sentence = f"The patient was managed surgically with {procedure}"
+        if medicines:
+            treatment_sentence += f", together with {medicines}"
+        sentences.append(treatment_sentence + '.')
+    elif medicines:
+        sentences.append(f"The patient was managed conservatively with {medicines}.")
+    elif procedure:
+        sentences.append(f"The documented treatment/procedure was {procedure}.")
 
-        # Validation assessment
-        validation = ''
-        if investigations and investigations.lower() not in ('no deranged', '-', 'none'):
-            validation = f'investigation findings {investigations} supported the diagnosis.'
-        elif clinical_findings and clinical_findings != '-':
-            validation = f'clinical findings {clinical_findings} supported the diagnosis.'
-        else:
-            validation = 'clinical presentation was consistent with the diagnosis.'
+    if clinical_course:
+        sentences.append(f"The documented clinical course and discharge status were {clinical_course}.")
 
-        # Build conclusion
-        conclusion = (
-            f"Based on available medical documents, patient presented with {chief_complaints} "
-            f"and was diagnosed with {diagnosis}. {validation.capitalize()} "
-            f"Patient was treated {treatment_type} with {antibiotic_str}. "
-            f"The case appears clinically genuine and appropriately documented."
+    if recommendation == 'APPROVE':
+        sentences.append(
+            "The documented presentation, objective findings, and treatment support the medical necessity of admission. "
+            "The case appears clinically consistent and is recommended as admissible, subject to policy terms and bill verification."
+        )
+    elif recommendation == 'REJECT':
+        sentences.append(
+            "The submitted evidence does not adequately establish the medical necessity or admissibility of the claimed inpatient care. "
+            "The claim is therefore not recommended for approval, subject to policy terms and final medical review."
+        )
+    else:
+        gap = query_reason or 'material clinical or supporting evidence remains insufficiently documented'
+        sentences.append(
+            f"However, {gap}. The claim should remain under query until the required records are provided and verified."
         )
 
-        return conclusion.strip()
-    except Exception as e:
-        logger.warning(f"Error generating medical-legal conclusion: {e}")
-        return structured_json.get('conclusion', 'Clinical assessment based on available medical documents.')
+    return re.sub(r'\s+', ' ', ' '.join(sentences)).strip()
 
 
 def auto_generate_report(cur, claim_id: str, structured_json: dict):
-    """Auto-generate medical report for claim."""
+    """Auto-generate medical report for claim with ML-based recommendations."""
     try:
         from datetime import datetime as dt
+
+        # Get ML prediction for recommendation
+        ml_result = predict_claim(structured_json)
+        ml_recommendation = None
+        ml_confidence = 0.0
+        ml_probabilities = {}
+
+        if ml_result:
+            ml_recommendation = ml_result.get('recommendation')
+            ml_confidence = ml_result.get('confidence', 0.0)
+            ml_probabilities = ml_result.get('probabilities', {})
+            logger.info(f'📊 ML prediction for {claim_id}: {ml_recommendation} ({ml_confidence:.2%})')
+
+        # Get Gemini recommendation (fallback)
+        gemini_recommendation = structured_json.get('recommendation', 'need_more_evidence')
+
+        # Use ML recommendation if available and confident, else use Gemini
+        final_recommendation = ml_recommendation or gemini_recommendation
+
+        if ml_result:
+            logger.info(f'Recommendations - ML: {ml_recommendation} | Gemini: {gemini_recommendation} | Final: {final_recommendation}')
 
         # Extract all fields with defaults
         company_name = structured_json.get('company_name', 'Medi Assist Insurance TPA Pvt. Ltd.')
@@ -238,7 +440,7 @@ def auto_generate_report(cur, claim_id: str, structured_json: dict):
         daily_tpr = structured_json.get('daily_tpr_chart_min_max', structured_json.get('daily_tpr_chart', '-'))
         medicine_used = structured_json.get('medicine_used', '-')
         claimed_amount = structured_json.get('claimed_amount', '-')
-        recommendation = structured_json.get('recommendation', 'QUERY')
+        recommendation = final_recommendation.upper() if final_recommendation else 'QUERY'
         query_reason = structured_json.get('query_reason', '')
 
         # Generate professional medical-legal conclusion from clinical evidence
@@ -331,7 +533,13 @@ def auto_generate_report(cur, claim_id: str, structured_json: dict):
 </table>
 
 <hr style="margin-top: 15px;">
-<p style="font-size: 10px; color: #666; margin-top: 10px;">Note: This report was auto-generated using AI analysis of OCR-extracted medical documents. Doctor review is required before final approval.</p>
+<div style="background-color: #f0f8ff; padding: 8px; margin-top: 10px; border-radius: 4px; font-size: 10px; color: #333;">
+<strong>AI Analysis:</strong>
+<br/>ML Model: {recommendation} (confidence: {ml_confidence:.1%})<br/>Gemini: {gemini_recommendation}<br/>
+{f'ML Probabilities - Approve: {ml_probabilities.get("approve", 0):.1%}, Reject: {ml_probabilities.get("reject", 0):.1%}, Need Evidence: {ml_probabilities.get("need_more_evidence", 0):.1%}' if ml_result else 'ML model not available'}
+<br/><br/>
+<em>Note: This report was auto-generated using ML and OCR analysis of medical documents. Doctor review is required before final approval.</em>
+</div>
 </div>"""
 
         # Keep simple text version as backup
@@ -392,13 +600,13 @@ CONCLUSION:
                 updated_at = NOW()
         ''', (
             claim_id,
-            structured_data['hospital_name'],
-            structured_data['treating_doctor'],
-            structured_data['diagnosis'],
-            structured_data['complaints'],
-            structured_data['medicine_used'],
-            structured_data['claim_amount'],
-            structured_data['conclusion'],
+            hospital_name,
+            treating_doctor,
+            diagnosis,
+            chief_complaints,
+            medicine_used,
+            claimed_amount,
+            conclusion,
             text_report,
             'generated'
         ))
@@ -436,7 +644,8 @@ def run_stage2_loop():
 
     while True:
         try:
-            raw_task = r.brpop('queue:stage2_claim_reduction', timeout=30)
+            promote_due_stage2_retries()
+            raw_task = r.brpop(STAGE2_QUEUE, timeout=30)
             if not raw_task:
                 continue
 
@@ -445,6 +654,8 @@ def run_stage2_loop():
 
             logger.info(f'Processing Claim {claim_id}: Extracting structured data with {GEMINI_MODEL}')
 
+            conn = None
+            cur = None
             try:
                 conn = psycopg.connect(DB_DSN)
                 cur = conn.cursor()
@@ -465,10 +676,7 @@ def run_stage2_loop():
 
                 ocr_rows = cur.fetchall()
                 if not ocr_rows:
-                    logger.warning(f'No OCR text found for claim {claim_id}')
-                    cur.close()
-                    conn.close()
-                    continue
+                    raise ValueError(f'No OCR text found for claim {claim_id}')
 
                 # Combine OCR from all documents
                 combined_texts = []
@@ -481,19 +689,13 @@ def run_stage2_loop():
                 logger.info(f'Combined OCR from {len(ocr_rows)} documents: {len(ocr_text)} chars for claim {claim_id}')
 
                 if not ocr_text.strip():
-                    logger.warning(f'Skipping claim {claim_id}: extracted rows contain no OCR text')
-                    cur.close()
-                    conn.close()
-                    continue
+                    raise ValueError(f'Extracted rows contain no OCR text for claim {claim_id}')
 
                 # Extract structured data with Gemini
                 structured_json = extract_structured_data_gemini(ocr_text, claim_id)
 
                 if not structured_json:
-                    logger.warning(f'Failed to extract structured data for claim {claim_id}')
-                    cur.close()
-                    conn.close()
-                    continue
+                    raise RuntimeError(f'Failed to extract structured data for claim {claim_id}')
 
                 # Get external claim ID
                 cur.execute('SELECT external_claim_id FROM claims WHERE id = %s', (claim_id,))
@@ -566,6 +768,9 @@ def run_stage2_loop():
                 else:
                     logger.info('Stage 3 already scheduled for claim %s', claim_id)
 
+                r.zrem(STAGE2_RETRY_SET, claim_id)
+                r.hdel(STAGE2_RETRY_PAYLOADS, claim_id)
+
                 cur.close()
                 conn.close()
 
@@ -573,6 +778,13 @@ def run_stage2_loop():
 
             except Exception as e:
                 logger.error(f'Stage 2 Error on Claim {claim_id}: {str(e)}', exc_info=True)
+                schedule_stage2_retry(task, e)
+            finally:
+                if cur is not None:
+                    cur.close()
+                if conn is not None:
+                    conn.close()
+                r.delete(f'queue:stage2_scheduled:{claim_id}')
 
         except redis.exceptions.TimeoutError:
             continue
