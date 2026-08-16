@@ -119,7 +119,7 @@ def extract_with_openai_vision(file_data_list):
             for filename, data_base64, mime_type in batch:
                 if mime_type == 'application/pdf':
                     content.append({
-                        "type": "document",
+                        "type": "file",
                         "source": {
                             "type": "base64",
                             "media_type": "application/pdf",
