@@ -109,11 +109,15 @@ class ExtractionQueueService:
                     s3_key = storage_key
 
                 task = {
+                    "job_id": str(job_id),
                     "document_id": str(document_id),
                     "claim_id": str(doc["claim_id"]),
                     "s3_bucket": s3_bucket,
                     "s3_key": s3_key,
+                    "force_refresh": bool(force_refresh),
                 }
+                _redis.delete(f"queue:stage2_scheduled:{doc['claim_id']}")
+                _redis.delete(f"queue:stage3_scheduled:{doc['claim_id']}")
                 _redis.lpush("queue:stage1_ocr_extraction", json.dumps(task))
                 logger.info(f"Pushed job to Redis: {document_id}")
             except Exception as e:

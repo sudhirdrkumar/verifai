@@ -490,7 +490,7 @@
 
   async function loadReportHtml() {
     if (reportEditorEl) reportEditorEl.innerHTML = '<p class="muted">Loading report...</p>';
-    const sources = ['doctor', 'system', 'any'];
+    const sources = ['auditor', 'doctor', 'system', 'any'];
 
     for (let i = 0; i < sources.length; i += 1) {
       const src = sources[i];
@@ -806,7 +806,7 @@
     }
   }
 
-  async function saveDoctorHtml() {
+  async function saveAuditorHtml() {
     const html = normalizeHealthClaimReportTitle(String(reportEditorEl ? reportEditorEl.innerHTML : '').trim());
     if (!html) throw new Error('Report content is empty.');
 
@@ -816,7 +816,7 @@
       body: JSON.stringify({
         report_html: html,
         report_status: 'draft',
-        report_source: 'doctor',
+        report_source: 'auditor',
       }),
     });
 
@@ -856,7 +856,7 @@
     setBusy(true);
     setMessage('', 'Saving report, marking QC done, and saving rating...');
     try {
-      const saved = await saveDoctorHtml();
+      const saved = await saveAuditorHtml();
       const qcUpdated = await markQcDone();
       await saveAuditorRating(rating);
       const qcLabel = String(qcUpdated && qcUpdated.qc_status ? qcUpdated.qc_status : 'yes').toLowerCase() === 'yes' ? 'QC Yes' : 'QC No';
@@ -1000,7 +1000,7 @@
       setBusy(true);
       setMessage('', 'Saving report...');
       try {
-        const saved = await saveDoctorHtml();
+        const saved = await saveAuditorHtml();
         setMessage('ok', 'Saved. Report version: ' + String(saved && saved.version_no ? saved.version_no : '-'));
       } catch (err) {
         setMessage('err', err && err.message ? err.message : 'Save failed.');

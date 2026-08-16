@@ -1373,13 +1373,23 @@ def save_claim_report_html_endpoint(
         raise HTTPException(status_code=400, detail=f"invalid report_status. allowed: {', '.join(sorted(allowed_status))}")
 
     report_source = (payload.report_source or "doctor").strip().lower() or "doctor"
-    if report_source not in {"doctor", "system"}:
-        raise HTTPException(status_code=400, detail="invalid report_source. allowed: doctor, system")
+    if report_source == "auto":
+        report_source = "system"
+    if report_source not in {"doctor", "system", "auditor", "edited"}:
+        raise HTTPException(status_code=400, detail="invalid report_source. allowed: auto, system, doctor, auditor, edited")
+    if report_source == "auditor" and current_user.role not in {UserRole.auditor, UserRole.super_admin}:
+        raise HTTPException(status_code=403, detail="only an auditor can save an auditor report")
+    if report_source == "edited" and current_user.role not in {UserRole.user, UserRole.super_admin}:
+        raise HTTPException(status_code=403, detail="only a user or super admin can save the final edited report")
 
     actor_id = (payload.actor_id or current_user.username or "").strip() or current_user.username
     created_by = actor_id
     if report_source == "system":
         created_by = actor_id if actor_id.lower().startswith("system:") else f"system:{actor_id}"
+    elif report_source == "auditor":
+        created_by = actor_id if actor_id.lower().startswith("auditor:") else f"auditor:{actor_id}"
+    elif report_source == "edited":
+        created_by = actor_id if actor_id.lower().startswith("edited:") else f"edited:{actor_id}"
 
     decision_row = db.execute(
         text(
@@ -1498,7 +1508,7 @@ def save_claim_report_html_endpoint(
         )
 
 
-    if current_user.role in {UserRole.auditor, UserRole.super_admin} and report_source == "doctor":
+    if current_user.role in {UserRole.auditor, UserRole.super_admin} and report_source == "auditor":
         auditor_learning = _extract_auditor_learning_from_report_html(report_html)
         db.execute(
             text(
@@ -1829,74 +1839,57 @@ def process_claim_endpoint(
         raise HTTPException(status_code=403, detail="doctor can queue only assigned claims")
 
     from sqlalchemy import text
-    from uuid import uuid4
-    from datetime import datetime
-    import json
-    import redis
-    import os
+    from app.services.extraction_queue_service import extraction_queue_service
+    from app.schemas.extraction import ExtractionProvider
 
     try:
-        # Get documents with storage_key
+        db.execute(
+            text("SELECT pg_advisory_xact_lock(hashtext(:claim_id))"),
+            {"claim_id": str(claim_id)},
+        )
         documents = db.execute(
-            text("SELECT id, storage_key FROM claim_documents WHERE claim_id = :claim_id"),
+            text("SELECT id FROM claim_documents WHERE claim_id = :claim_id ORDER BY uploaded_at, id"),
             {"claim_id": str(claim_id)}
         ).fetchall()
 
         if not documents:
             raise HTTPException(status_code=404, detail="no documents found for claim")
 
-        # Create extraction jobs directly
-        r = redis.Redis(host=os.getenv('REDIS_HOST', '127.0.0.1'), port=int(os.getenv('REDIS_PORT', 6379)), decode_responses=True)
+        active_jobs = int(db.execute(
+            text("""
+                SELECT COUNT(*)
+                FROM extraction_jobs
+                WHERE claim_id = :claim_id AND status IN ('queued', 'processing')
+            """),
+            {"claim_id": str(claim_id)},
+        ).scalar_one() or 0)
+        if active_jobs:
+            raise HTTPException(
+                status_code=409,
+                detail=f"claim already has {active_jobs} queued or processing extraction job(s)",
+            )
+
+        has_previous_extraction = bool(db.execute(
+            text("SELECT EXISTS (SELECT 1 FROM document_extractions WHERE claim_id = :claim_id)"),
+            {"claim_id": str(claim_id)},
+        ).scalar_one())
         queued_jobs = []
-
-        for doc_id, storage_key in documents:
-            doc_uuid = str(doc_id)
-            job_id = str(uuid4())
-
-            # Delete any existing job for this document
-            db.execute(
-                text("DELETE FROM extraction_jobs WHERE document_id = :doc_id"),
-                {"doc_id": doc_uuid}
+        for (doc_id,) in documents:
+            job = extraction_queue_service.enqueue(
+                document_id=doc_id,
+                provider=ExtractionProvider.openai,
+                actor_id=current_user.username,
+                force_refresh=has_previous_extraction,
             )
-
-            # Insert extraction job
-            db.execute(
-                text("""
-                    INSERT INTO extraction_jobs (id, document_id, claim_id, status, queued_at)
-                    VALUES (:id, :doc_id, :claim_id, 'queued', NOW())
-                """),
-                {"id": job_id, "doc_id": doc_uuid, "claim_id": str(claim_id)}
-            )
-
-            # Queue in Redis
-            r.lpush('queue:stage1_ocr_extraction', json.dumps({
-                'document_id': doc_uuid,
-                'claim_id': str(claim_id),
-                's3_key': storage_key
-            }))
-
-            queued_jobs.append(job_id)
-
-        db.commit()
-        return {
-            "status": "queued",
-            "claim_id": str(claim_id),
-            "documents_queued": len(queued_jobs),
-            "job_ids": queued_jobs,
-            "message": f"✅ Queued {len(queued_jobs)} document(s) for extraction"
-        }
-
-        if len(queued_jobs) == 0:
-            message = f"No new jobs queued - all {len(documents)} documents already have extraction jobs in progress or queued"
-        else:
-            message = f"✅ Claim queued: {len(queued_jobs)} document(s) added to extraction queue"
+            queued_jobs.append(str(job.job_id))
 
         return {
             "status": "queued",
             "claim_id": str(claim_id),
             "documents_queued": len(queued_jobs),
             "job_ids": queued_jobs,
-            "message": message
+            "message": f"Queued {len(queued_jobs)} document(s) for extraction",
+            "requeue": has_previous_extraction,
         }
     except HTTPException:
         raise
@@ -2015,6 +2008,10 @@ def bulk_process_claims_endpoint(
             continue
 
         try:
+            db.execute(
+                text("SELECT pg_advisory_xact_lock(hashtext(:claim_id))"),
+                {"claim_id": str(claim_id)},
+            )
             documents = db.execute(
                 text("SELECT id FROM claim_documents WHERE claim_id = :claim_id"),
                 {"claim_id": str(claim_id)}
@@ -2028,6 +2025,25 @@ def bulk_process_claims_endpoint(
                 })
                 continue
 
+            active_jobs = int(db.execute(
+                text("""
+                    SELECT COUNT(*) FROM extraction_jobs
+                    WHERE claim_id = :claim_id AND status IN ('queued', 'processing')
+                """),
+                {"claim_id": str(claim_id)},
+            ).scalar_one() or 0)
+            if active_jobs:
+                results.append({
+                    "claim_id": str(claim_id),
+                    "status": "skipped",
+                    "reason": f"claim already has {active_jobs} active extraction job(s)",
+                })
+                continue
+
+            has_previous_extraction = bool(db.execute(
+                text("SELECT EXISTS (SELECT 1 FROM document_extractions WHERE claim_id = :claim_id)"),
+                {"claim_id": str(claim_id)},
+            ).scalar_one())
             queued_jobs = []
             for (doc_id,) in documents:
                 try:
@@ -2035,20 +2051,14 @@ def bulk_process_claims_endpoint(
                 except Exception:
                     continue
 
-                existing_job = db.execute(
-                    text("SELECT id FROM extraction_jobs WHERE document_id = :doc_id AND status IN ('queued', 'processing')"),
-                    {"doc_id": str(doc_uuid)}
-                ).fetchone()
-
-                if not existing_job:
-                    job = extraction_queue_service.enqueue(
-                        document_id=doc_uuid,
-                        provider=ExtractionProvider.auto,
-                        actor_id=current_user.username,
-                        force_refresh=payload.force_refresh
-                    )
-                    job_id = job.job_id if hasattr(job, 'job_id') else job.id
-                    queued_jobs.append(str(job_id))
+                job = extraction_queue_service.enqueue(
+                    document_id=doc_uuid,
+                    provider=ExtractionProvider.openai,
+                    actor_id=current_user.username,
+                    force_refresh=bool(payload.force_refresh or has_previous_extraction),
+                )
+                job_id = job.job_id if hasattr(job, 'job_id') else job.id
+                queued_jobs.append(str(job_id))
 
             total_documents_queued += len(queued_jobs)
             results.append({

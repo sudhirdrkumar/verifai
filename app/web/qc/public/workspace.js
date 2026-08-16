@@ -31,6 +31,7 @@
       { page: "assign-cases", label: "Assign Cases" },
       { page: "withdrawn-claims", label: "Withdrawn Claims" },
       { page: "upload-document", label: "Upload Document" },
+      { page: "ai-queue", label: "AI Extraction Queue" },
       { page: "completed-not-uploaded", label: "Completed (Not Uploaded)" },
       { page: "completed-uploaded", label: "Completed (Uploaded)" },
       { page: "export-data", label: "Export Data" },
@@ -55,6 +56,7 @@
     medicines: "Medicines",
     "storage-maintenance": "Storage Maintenance",
     "ai-prompt": "AI Prompt",
+    "ai-queue": "AI Extraction Queue",
     "legacy-sync": "Legacy Migration",
     "assigned-cases": "Assigned Cases",
     ratings: "Ratings",
@@ -2277,8 +2279,8 @@
       + '<p id="doctor-assigned-msg"></p>'
       + '<p class="muted claim-total" id="doctor-assigned-total">Total claims: 0</p>'
       + '<div class="table-wrap claim-status-table-wrap"><table><thead><tr>'
-      + '<th>Claim ID</th><th>Treatment Type</th><th>Status</th><th>VerifAI JSON</th><th>Documents</th><th>Last Upload</th><th>Assigned At</th><th>Allotment Date</th><th>Final Status</th><th>Action</th>'
-      + '</tr></thead><tbody id="doctor-assigned-tbody"><tr><td colspan="10">Loading...</td></tr></tbody></table></div>'
+      + '<th>Claim ID</th><th>Treatment Type</th><th>Status</th><th>VerifAI JSON</th><th>AI Status</th><th>Documents</th><th>Last Upload</th><th>Assigned At</th><th>Allotment Date</th><th>Final Status</th><th>Action</th>'
+      + '</tr></thead><tbody id="doctor-assigned-tbody"><tr><td colspan="11">Loading...</td></tr></tbody></table></div>'
       + '<div class="claim-pagination">'
       + '<div class="claim-pagination__left"><label for="doctor-page-size">Rows</label><select id="doctor-page-size"><option value="10">10</option><option value="20" selected>20</option><option value="50">50</option></select></div>'
       + '<div class="claim-pagination__info" id="doctor-page-info">Showing 0-0 of 0</div>'
@@ -2307,6 +2309,26 @@
     function renderFinalStatus(raw) {
       const normalized = String(raw || 'Pending').replace(/<br\s*\/?\s*>/gi, '\n');
       return escapeHtml(normalized).replace(/\n/g, '<br>');
+    }
+
+    function getDoctorProcessingState(claim) {
+      const documents = Number(claim && claim.documents || 0);
+      const extracted = Number(claim && claim.extraction_succeeded || 0);
+      const queued = Number(claim && claim.extraction_queued || 0);
+      const running = Number(claim && claim.extraction_running || 0);
+      const structured = Number(claim && claim.structured_count || 0);
+      const reports = Number(claim && claim.report_count || 0);
+      const isReady = documents > 0 && extracted >= documents && structured > 0 && reports > 0;
+      const isUnderQueue = !isReady && (
+        queued > 0
+        || running > 0
+        || (documents > 0 && extracted >= documents)
+        || structured > 0
+      );
+      return {
+        label: isReady ? 'Ready' : (isUnderQueue ? 'Under Queue' : 'Pending for Processing'),
+        ready: isReady,
+      };
     }
 
     async function openCaseDetail(claimUuid, externalClaimId, searchClaim, allotmentDate, triggerButton) {
@@ -2431,24 +2453,27 @@
       const sortedItems = sortClaimsByAllotmentDateFirst((result.items || []), true);
       const rows = sortedItems.map((c) => {
         const treatmentType = resolveTreatmentType(c);
+        const processingState = getDoctorProcessingState(c);
+        const actionDisabled = processingState.ready ? '' : ' disabled title="Available after extraction, structure and report are complete"';
         return '<tr>'
           + '<td>' + escapeHtml(c.external_claim_id || '-') + '</td>'
           + '<td>' + escapeHtml(treatmentType || '-') + '</td>'
           + '<td>' + statusChip(formatStatusText(c.status_display || c.status)) + '</td>'
           + renderVerifaiJsonStatusCell(c)
+          + '<td>' + statusChip(processingState.label) + '</td>'
           + '<td>' + escapeHtml(String(c.documents || 0)) + '</td>'
           + '<td>' + escapeHtml(formatDateTime(c.last_upload)) + '</td>'
           + '<td>' + escapeHtml(formatDateTime(c.assigned_at)) + '</td>'
           + '<td>' + escapeHtml(formatDateOnly(c.allotment_date)) + '</td>'
           + '<td class="doctor-final-status">' + renderFinalStatus(c.final_status) + '</td>'
           + '<td><div class="doctor-case-actions">'
-          + '<button type="button" class="btn-soft" data-open-case="' + escapeHtml(c.external_claim_id || '') + '" data-open-claim-id="' + escapeHtml(c.id || '') + '">Open Case</button>'
-          + '<button type="button" class="btn-soft" data-change-status="' + escapeHtml(c.id) + '" data-current-status="' + escapeHtml(c.status || '') + '">Change Status</button>'
+          + '<button type="button" class="btn-soft" data-open-case="' + escapeHtml(c.external_claim_id || '') + '" data-open-claim-id="' + escapeHtml(c.id || '') + '"' + actionDisabled + '>Open Case</button>'
+          + '<button type="button" class="btn-soft" data-change-status="' + escapeHtml(c.id) + '" data-current-status="' + escapeHtml(c.status || '') + '"' + actionDisabled + '>Change Status</button>'
           + '</div></td>'
           + '</tr>';
       }).join('');
 
-      tbody.innerHTML = rows || '<tr><td colspan="10">No assigned claims found.</td></tr>';
+      tbody.innerHTML = rows || '<tr><td colspan="11">No assigned claims found.</td></tr>';
       await refreshVerifaiJsonStatusCells(tbody);
 
       tbody.querySelectorAll('button[data-open-case]').forEach((btn) => {
@@ -2524,7 +2549,8 @@
     const isAuditorRole = activeRouteRole === 'auditor' || !!(me && me.role === 'auditor');
     const backPage = backPageParam || (activeRouteRole === 'user' ? 'upload-document' : (isAuditorRole ? 'audit-claims' : 'assigned-cases'));
     const preferredReportSourceParam = String(routeParams.get('report_source') || 'doctor').trim().toLowerCase();
-    let preferredReportSource = (preferredReportSourceParam === 'system' || preferredReportSourceParam === 'doctor') ? preferredReportSourceParam : 'doctor';
+    const validReportSources = ['system', 'doctor', 'auditor', 'edited'];
+    let preferredReportSource = validReportSources.includes(preferredReportSourceParam) ? preferredReportSourceParam : 'doctor';
 
     if (!claimUuid) {
       contentPanel.innerHTML = '<section class="claim-status-panel">'
@@ -2549,8 +2575,6 @@
       + '<div class="link-row case-detail-actions">'
       + '<button type="button" id="case-generate-report" disabled>Generate Report</button>'
       + '<button type="button" class="btn-soft" id="case-change-status" disabled>Mark Completed</button>'
-      + '<button type="button" class="btn-soft" id="case-verify-extract" disabled>Verify</button>'
-      + '<button type="button" class="btn-soft" id="case-force-verifai" disabled>Force VerifAI</button>'
       + '<span id="case-report-ready-state" class="muted" style="display:none;align-self:center;font-size:13px;font-weight:700;color:#047857;margin-left:8px;">Extraction ready for report</span>'
       + '</div>'
       + '<div id="case-extraction-progress" style="margin-top:10px; display:none;">'
@@ -5906,7 +5930,8 @@
     }
 
     async function loadSavedReportBySource(source, silentIfMissing, options) {
-      const targetSource = (String(source || 'doctor').toLowerCase() === 'system') ? 'system' : 'doctor';
+      const requestedSource = String(source || 'doctor').trim().toLowerCase();
+      const targetSource = ['system', 'doctor', 'auditor', 'edited'].includes(requestedSource) ? requestedSource : 'doctor';
       try {
         const opts = options || {};
         const allowStale = opts.allowStale !== false;
@@ -7540,6 +7565,7 @@
     const isAuditorDashboardPage = auditOnlyRole && routePage === 'dashboard';
     const shouldExcludeTaggedForAuditor = isAuditorAuditClaimsPage || isAuditorDashboardPage;
     const hideQcAndSystemActions = routeRole === 'user' && routePage === 'completed-not-uploaded';
+    const includeAllQcForPendingUploads = hideQcAndSystemActions;
 
     const doctors = await fetchDoctors();
     const doctorFilterOptions = '<option value="">All Doctors</option>'
@@ -7586,6 +7612,8 @@
     };
     if (auditOnlyRole) {
       state.qc = 'no';
+    } else if (includeAllQcForPendingUploads) {
+      state.qc = 'all';
     }
     const defaultTaggingMap = {
       Genuine: ['Hospitalization verified and found to be genuine'],
@@ -7750,9 +7778,9 @@
       doctorFilterEl.value = hasDoctorOption ? doctorSaved : '';
     }
 
-    if (auditOnlyRole) {
+    if (auditOnlyRole || includeAllQcForPendingUploads) {
       if (qcFilterEl) {
-        qcFilterEl.value = 'no';
+        qcFilterEl.value = auditOnlyRole ? 'no' : 'all';
         qcFilterEl.disabled = true;
         const qcFilterGroup = qcFilterEl.closest('.claim-filter-group');
         if (qcFilterGroup) qcFilterGroup.style.display = 'none';
@@ -8034,7 +8062,8 @@
       if (!claimUuid) return;
 
       reportEditorCurrentRow = row;
-      reportEditorCurrentSource = (String(reportSource || 'doctor').toLowerCase() === 'system') ? 'system' : 'doctor';
+      const requestedSource = String(reportSource || 'doctor').trim().toLowerCase();
+      reportEditorCurrentSource = 'edited';
       if (reportEditorClaimLabelEl) {
         reportEditorClaimLabelEl.textContent = 'Claim ID: ' + (claimId || '-');
       }
@@ -8045,7 +8074,9 @@
       openReportEditorModal();
 
       try {
-        const payload = await apiFetch('/api/v1/user-tools/completed-reports/' + encodeURIComponent(claimUuid) + '/latest-html?source=' + encodeURIComponent(reportEditorCurrentSource));
+        const payload = requestedSource === 'best'
+          ? await fetchBestSavedReport(claimUuid)
+          : await apiFetch('/api/v1/user-tools/completed-reports/' + encodeURIComponent(claimUuid) + '/latest-html?source=' + encodeURIComponent(requestedSource));
         const html = normalizeHealthClaimReportTitle(String(payload && payload.report_html ? payload.report_html : '').trim());
         if (!html) {
           throw new Error('No saved report HTML found for this source.');
@@ -8119,7 +8150,7 @@
     async function fetchBestSavedReport(claimUuid) {
       const id = String(claimUuid || '').trim();
       if (!id) throw new Error('Claim key missing.');
-      const sources = ['doctor', 'system', 'any'];
+      const sources = ['edited', 'auditor', 'doctor', 'system', 'any'];
       let lastErr = null;
       for (let i = 0; i < sources.length; i += 1) {
         const src = sources[i];
@@ -8424,7 +8455,7 @@
       const statusFilterRaw = String(statusFilterEl && statusFilterEl.value ? statusFilterEl.value : state.status).trim();
       const qcFilterRaw = String(qcFilterEl && qcFilterEl.value ? qcFilterEl.value : (state.qc || 'no')).trim();
       const statusFilter = statusFilterRaw;
-      const qcFilter = auditOnlyRole ? 'no' : qcFilterRaw;
+      const qcFilter = auditOnlyRole ? 'no' : (includeAllQcForPendingUploads ? 'all' : qcFilterRaw);
       const doctorFilter = String(doctorFilterEl && doctorFilterEl.value ? doctorFilterEl.value : '').trim();
 
       const params = new URLSearchParams();
@@ -8594,7 +8625,7 @@
           const rowHasSystemReport = !!row.system_report_html_available || rowHasReportHtml;
           try {
             if (rowHasDoctorReport) {
-              await openEditableReport(row, 'doctor');
+              await openEditableReport(row, 'best');
             } else if (rowHasSystemReport) {
               await openEditableReport(row, 'system');
             } else {
@@ -9893,6 +9924,509 @@ async function renderLegacyMigration() {
       + '<p class="msg ok">Navbar is aligned with QC admin pages. AI prompt backend module can be wired next.</p>';
   }
 
+  async function renderAIQueue() {
+    const state = {
+      page: 1,
+      pageSize: 10,
+      total: 0,
+      statusFilter: 'all',
+      pipelineStatus: 'all',
+      searchClaim: '',
+      doctorFilter: '',
+      jobPage: 1,
+      jobPageSize: 10,
+      jobTotal: 0,
+      jobStatusFilter: 'all',
+      selectedClaims: new Set(),
+    };
+    const me = await apiFetch('/api/v1/auth/me');
+    const doctors = await fetchDoctors().catch(function () { return []; });
+    const claimStatusMap = new Map();
+    let jobPollTimer = null;
+
+    function formatAssignedDoctor(value) {
+      return String(value || '').split(',').map(function (s) {
+        return String(s || '').trim();
+      }).filter(Boolean)[0] || '-';
+    }
+
+    const doctorOptionsHtml = ['<option value="">All Doctors</option>'].concat((Array.isArray(doctors) ? doctors : []).map(function (name) {
+      const label = String(name || '').trim();
+      if (!label) return '';
+      return '<option value="' + escapeHtml(label) + '">' + escapeHtml(label) + '</option>';
+    }).filter(Boolean)).join('');
+
+    contentPanel.innerHTML = '<section class="claim-status-panel">'
+      + '<h2 class="claim-status-title">AI Queue</h2>'
+      + '<p class="muted">Queue claim documents for extraction and track job status in one place.</p>'
+      + '<form id="ai-queue-filter-form" class="claim-status-toolbar">'
+      + '<div class="claim-filter-group"><label for="ai-queue-search">Search Claim</label><input id="ai-queue-search" name="search_claim" placeholder="Claim ID"></div>'
+      + '<div class="claim-filter-group"><label for="ai-queue-doctor-filter">Doctor</label><select id="ai-queue-doctor-filter" name="doctor_filter">' + doctorOptionsHtml + '</select></div>'
+      + '<div class="claim-filter-group"><label for="ai-queue-status-filter">Status</label><select id="ai-queue-status-filter"><option value="all">All</option><option value="ready_for_assignment">Ready For Assignment</option><option value="waiting_for_documents">Waiting For Documents</option><option value="pending">Pending</option><option value="in_review">In Review</option><option value="needs_qc">Needs QC</option><option value="completed">Completed</option></select></div>'
+      + '<div class="claim-filter-group"><label for="ai-queue-pipeline-filter">Pipeline Status</label><select id="ai-queue-pipeline-filter"><option value="all">All</option><option value="failed">Failed</option><option value="success">Success</option><option value="queued">Queued</option><option value="pending">Pending</option></select></div>'
+      + '<div class="claim-filter-action"><button type="submit" class="claim-apply-btn">Apply</button></div>'
+      + '<div class="claim-filter-action"><button type="button" class="btn-soft" id="ai-queue-reset">Reset</button></div>'
+      + '</form>'
+      + '<p id="ai-queue-msg"></p>'
+      + '<div class="link-row" style="margin-bottom:12px;">'
+      + '<button type="button" class="btn-soft" id="ai-queue-select-page">Select Page</button>'
+      + '<button type="button" class="btn-soft" id="ai-queue-clear-selection" disabled>Clear Selection</button>'
+      + '<button type="button" id="ai-queue-bulk-submit" disabled>Queue Selected (0)</button>'
+      + '</div>'
+      + '<div class="stats-grid" style="margin-bottom:14px;">'
+      + '<article class="stat-card"><div class="muted">Queued</div><div class="value" id="ai-queue-stat-queued">0</div></article>'
+      + '<article class="stat-card"><div class="muted">Running</div><div class="value" id="ai-queue-stat-running">0</div></article>'
+      + '<article class="stat-card"><div class="muted">Succeeded</div><div class="value" id="ai-queue-stat-succeeded">0</div></article>'
+      + '<article class="stat-card"><div class="muted">Failed</div><div class="value" id="ai-queue-stat-failed">0</div></article>'
+      + '</div>'
+      + '<h3>Claims Ready for Queue</h3>'
+      + '<div class="table-wrap claim-status-table-wrap"><table><thead><tr><th><input type="checkbox" id="ai-queue-select-visible" aria-label="Select visible claims"></th><th>CLAIM ID</th><th>DOCTOR</th><th>ALL FILES</th><th>UPLOADS</th><th>EXTRACTION</th><th>STRUCTURE</th><th>REPORT</th><th>VERIFAI JSON</th><th>ACTION</th></tr></thead><tbody id="ai-queue-tbody"><tr><td colspan="10">Loading...</td></tr></tbody></table></div>'
+      + '<div class="claim-pagination">'
+      + '<div class="claim-pagination__left"><label for="ai-queue-page-size">Rows</label><select id="ai-queue-page-size"><option value="10" selected>10</option><option value="20">20</option><option value="50">50</option></select></div>'
+      + '<div class="claim-pagination__info" id="ai-queue-page-info">Showing 0-0 of 0</div>'
+      + '<div class="claim-pagination__actions"><button type="button" class="btn-soft" id="ai-queue-prev-page">Previous</button><button type="button" class="btn-soft" id="ai-queue-next-page">Next</button></div>'
+      + '</div>'
+      + '<h3 style="margin-top:18px">Extraction Jobs</h3>'
+      + '<div class="claim-pagination" style="margin-bottom:12px;">'
+      + '<div class="claim-pagination__left"><label for="ai-queue-job-status-filter">Job Status</label><select id="ai-queue-job-status-filter"><option value="all">All</option><option value="queued">Queued</option><option value="running">Running</option><option value="succeeded">Succeeded</option><option value="failed">Failed</option></select></div>'
+      + '<div class="claim-pagination__info" id="ai-queue-job-page-info">Showing 0-0 of 0</div>'
+      + '<div class="claim-pagination__actions"><button type="button" class="btn-soft" id="ai-queue-job-prev-page">Previous</button><button type="button" class="btn-soft" id="ai-queue-job-next-page">Next</button></div>'
+      + '</div>'
+      + '<div class="table-wrap"><table><thead><tr><th>JOB ID</th><th>CLAIM ID</th><th>FILE</th><th>PROVIDER</th><th>STATUS</th><th>QUEUED AT</th><th>FINISHED AT</th></tr></thead><tbody id="ai-queue-job-tbody"><tr><td colspan="7">Loading...</td></tr></tbody></table></div>'
+      + '</section>';
+
+    const form = document.getElementById('ai-queue-filter-form');
+    const tbody = document.getElementById('ai-queue-tbody');
+    const pageSizeEl = document.getElementById('ai-queue-page-size');
+    const prevBtn = document.getElementById('ai-queue-prev-page');
+    const nextBtn = document.getElementById('ai-queue-next-page');
+    const pageInfoEl = document.getElementById('ai-queue-page-info');
+    const searchEl = document.getElementById('ai-queue-search');
+    const doctorEl = document.getElementById('ai-queue-doctor-filter');
+    const statusEl = document.getElementById('ai-queue-status-filter');
+    const pipelineStatusEl = document.getElementById('ai-queue-pipeline-filter');
+    const resetBtn = document.getElementById('ai-queue-reset');
+    const selectVisibleEl = document.getElementById('ai-queue-select-visible');
+    const selectPageBtn = document.getElementById('ai-queue-select-page');
+    const clearSelectionBtn = document.getElementById('ai-queue-clear-selection');
+    const bulkSubmitBtn = document.getElementById('ai-queue-bulk-submit');
+
+    const jobStatusEl = document.getElementById('ai-queue-job-status-filter');
+    const jobTbody = document.getElementById('ai-queue-job-tbody');
+    const jobPrevBtn = document.getElementById('ai-queue-job-prev-page');
+    const jobNextBtn = document.getElementById('ai-queue-job-next-page');
+    const jobPageInfoEl = document.getElementById('ai-queue-job-page-info');
+    const queuedStatEl = document.getElementById('ai-queue-stat-queued');
+    const runningStatEl = document.getElementById('ai-queue-stat-running');
+    const succeededStatEl = document.getElementById('ai-queue-stat-succeeded');
+    const failedStatEl = document.getElementById('ai-queue-stat-failed');
+
+    function updatePaginationUi() {
+      const total = Number(state.total || 0);
+      const startRow = total === 0 ? 0 : ((state.page - 1) * state.pageSize + 1);
+      const endRow = Math.min(state.page * state.pageSize, total);
+      if (pageInfoEl) pageInfoEl.textContent = 'Showing ' + startRow + '-' + endRow + ' of ' + total;
+      if (prevBtn) prevBtn.disabled = state.page <= 1;
+      if (nextBtn) nextBtn.disabled = endRow >= total;
+      if (pageSizeEl) pageSizeEl.value = String(state.pageSize);
+    }
+
+    function updateJobPaginationUi() {
+      const total = Number(state.jobTotal || 0);
+      const startRow = total === 0 ? 0 : ((state.jobPage - 1) * state.jobPageSize + 1);
+      const endRow = Math.min(state.jobPage * state.jobPageSize, total);
+      if (jobPageInfoEl) jobPageInfoEl.textContent = 'Showing ' + startRow + '-' + endRow + ' of ' + total;
+      if (jobPrevBtn) jobPrevBtn.disabled = state.jobPage <= 1;
+      if (jobNextBtn) jobNextBtn.disabled = endRow >= total;
+      if (jobStatusEl) jobStatusEl.value = state.jobStatusFilter;
+    }
+
+    function getClaimStageState(item) {
+      const documents = Number(item && item.documents || 0);
+      const succeeded = Number(item && item.extraction_succeeded || 0);
+      const queued = Number(item && item.extraction_queued || 0);
+      const running = Number(item && item.extraction_running || 0);
+      const failed = Number(item && item.extraction_failed || 0);
+      const structured = Number(item && item.structured_count || 0);
+      const reports = Number(item && item.report_count || 0);
+
+      let extraction = { label: 'Pending', detail: documents ? ('0/' + documents) : 'No documents' };
+      if (!documents) extraction = { label: 'No Documents', detail: '' };
+      else if (succeeded >= documents) extraction = { label: 'Completed', detail: succeeded + '/' + documents };
+      else if (running > 0) extraction = { label: 'Running', detail: succeeded + '/' + documents };
+      else if (queued > 0) extraction = { label: 'Queued', detail: succeeded + '/' + documents };
+      else if (failed > 0 && succeeded > 0) extraction = { label: 'Partial', detail: succeeded + '/' + documents + ', ' + failed + ' failed' };
+      else if (failed > 0) extraction = { label: 'Failed', detail: failed + '/' + documents };
+
+      let structure = { label: 'Waiting', detail: 'Extraction pending' };
+      if (structured > 0) structure = { label: 'Completed', detail: structured + ' result' + (structured === 1 ? '' : 's') };
+      else if (documents > 0 && succeeded >= documents) structure = { label: 'Queued', detail: 'Gemini structuring' };
+      else if (failed > 0 && queued === 0 && running === 0) structure = { label: 'Blocked', detail: 'Extraction failed' };
+
+      let report = { label: 'Waiting', detail: 'Structure pending' };
+      if (reports > 0) report = { label: 'Completed', detail: reports + ' report' + (reports === 1 ? '' : 's') };
+      else if (structured > 0) report = { label: 'Queued', detail: 'Report generation' };
+
+      return {
+        extraction: extraction,
+        structure: structure,
+        report: report,
+        canQueue: documents > 0 && queued === 0 && running === 0,
+      };
+    }
+
+    function renderStageCell(stage) {
+      const detail = String(stage && stage.detail || '').trim();
+      return statusChip(stage && stage.label || 'Pending')
+        + (detail ? '<div class="muted" style="margin-top:4px;white-space:nowrap;">' + escapeHtml(detail) + '</div>' : '');
+    }
+
+    function updateSelectionUi() {
+      const boxes = Array.from(tbody.querySelectorAll('input[data-ai-queue-select]'));
+      const enabledBoxes = boxes.filter(function (box) { return !box.disabled; });
+      const selectedVisible = enabledBoxes.filter(function (box) { return state.selectedClaims.has(String(box.value || '')); });
+      boxes.forEach(function (box) {
+        box.checked = state.selectedClaims.has(String(box.value || ''));
+      });
+      if (selectVisibleEl) {
+        selectVisibleEl.disabled = enabledBoxes.length === 0;
+        selectVisibleEl.checked = enabledBoxes.length > 0 && selectedVisible.length === enabledBoxes.length;
+        selectVisibleEl.indeterminate = selectedVisible.length > 0 && selectedVisible.length < enabledBoxes.length;
+      }
+      const selectedCount = state.selectedClaims.size;
+      if (bulkSubmitBtn) {
+        bulkSubmitBtn.disabled = selectedCount === 0;
+        bulkSubmitBtn.textContent = 'Queue Selected (' + selectedCount + ')';
+      }
+      if (clearSelectionBtn) clearSelectionBtn.disabled = selectedCount === 0;
+    }
+
+    async function refreshClaimStatus(claimIds) {
+      const ids = Array.from(new Set((claimIds || []).map(function (id) { return String(id || '').trim(); }).filter(Boolean)));
+      for (const claimId of ids) {
+        try {
+          const result = await apiFetch('/api/v1/user-tools/claim-document-status?search_claim=' + encodeURIComponent(claimId) + '&status_filter=all&limit=1&offset=0');
+          const item = result && Array.isArray(result.items) && result.items.length ? result.items[0] : null;
+          if (item) claimStatusMap.set(claimId, item);
+        } catch (_err) {
+        }
+      }
+    }
+
+    function renderQueueRows(items) {
+      if (!items.length) return '<tr><td colspan="6">No claims found.</td></tr>';
+      return items.map(function (item) {
+        const claimUuid = String(item.id || '').trim();
+        const claimId = String(item.external_claim_id || '-').trim();
+        const docs = Number(item.documents || 0);
+        const uploadSummary = docs > 0
+          ? (String(docs) + ' doc(s) from ' + String(Number(item.source_files || docs || 0)) + ' file(s)')
+          : 'No documents uploaded';
+        const statusCell = renderVerifaiJsonStatusCell(item, { compact: true });
+        const existingStatus = claimStatusMap.get(claimUuid);
+        const queueDisabled = docs <= 0 || (existingStatus && Number(existingStatus.documents || 0) <= 0);
+        const queueLabel = queueDisabled ? 'No Docs' : 'Queue Claim';
+        return '<tr>'
+          + '<td><code>' + escapeHtml(claimId) + '</code></td>'
+          + '<td>' + escapeHtml(formatAssignedDoctor(item.assigned_doctor_id || '')) + '</td>'
+          + '<td>' + escapeHtml(uploadSummary) + '</td>'
+          + '<td>' + escapeHtml(formatDateTime(item.last_upload || '')) + '</td>'
+          + '<td>' + statusCell + '</td>'
+          + '<td><button type="button" class="btn-soft" data-ai-queue-claim="' + escapeHtml(claimUuid) + '"' + (queueDisabled ? ' disabled' : '') + '>' + escapeHtml(queueLabel) + '</button></td>'
+          + '</tr>';
+      }).join('');
+    }
+
+    function renderJobRows(items) {
+      if (!items.length) return '<tr><td colspan="7">No extraction jobs found.</td></tr>';
+      return items.map(function (job) {
+        const jobStatus = String(job.status || '-');
+        const displayStatus = jobStatus.toLowerCase() === 'processing' ? 'Running' : jobStatus;
+        return '<tr>'
+          + '<td><code>' + escapeHtml(String(job.job_id || '-')) + '</code></td>'
+          + '<td><code>' + escapeHtml(String(job.external_claim_id || '-')) + '</code></td>'
+          + '<td>' + escapeHtml(String(job.file_name || '-')) + '</td>'
+          + '<td>' + escapeHtml(String(job.provider || '-')) + '</td>'
+          + '<td>' + statusChip(displayStatus) + (job.error_message ? '<div class="muted" style="margin-top:4px;">' + escapeHtml(job.error_message) + '</div>' : '') + '</td>'
+          + '<td>' + escapeHtml(formatDateTime(job.queued_at || '')) + '</td>'
+          + '<td>' + escapeHtml(formatDateTime(job.finished_at || '')) + '</td>'
+          + '</tr>';
+      }).join('');
+    }
+
+    async function loadQueueClaims(resetPage) {
+      if (resetPage) state.page = 1;
+      state.searchClaim = String(searchEl.value || '').trim();
+      state.doctorFilter = String(doctorEl.value || '').trim();
+      state.statusFilter = String(statusEl.value || 'all').trim();
+      state.pipelineStatus = String(pipelineStatusEl.value || 'all').trim();
+      tbody.innerHTML = '<tr><td colspan="10">Loading...</td></tr>';
+      setMessage('ai-queue-msg', '', '');
+
+      const params = new URLSearchParams();
+      params.set('limit', String(state.pageSize));
+      params.set('offset', String((state.page - 1) * state.pageSize));
+      params.set('status_filter', state.statusFilter || 'all');
+      params.set('pipeline_status', state.pipelineStatus || 'all');
+      params.set('exclude_withdrawn', 'true');
+      params.set('exclude_completed_uploaded', 'true');
+      if (state.searchClaim) params.set('search_claim', state.searchClaim);
+      if (state.doctorFilter) params.set('doctor_filter', state.doctorFilter);
+
+      try {
+        const result = await apiFetch('/api/v1/user-tools/claim-document-status?' + params.toString());
+        state.total = Number(result && result.total ? result.total : 0);
+        const items = Array.isArray(result && result.items) ? result.items : [];
+        const rows = items.map(function (item) {
+          const claimUuid = String(item.id || '').trim();
+          const claimId = String(item.external_claim_id || '-').trim();
+          const docs = Number(item.documents || 0);
+          const sourceFiles = Number(item.source_files || docs || 0);
+          const verifaiState = String(item.verifai_json_state || (item.verifai_queued ? 'waiting' : 'not_sent')).trim().toLowerCase();
+          const verifaiLabel = verifaiState === 'received' ? 'Received' : (verifaiState === 'waiting' ? 'Waiting' : 'Not Sent');
+          const stages = getClaimStageState(item);
+          const canQueue = stages.canQueue;
+          if (!canQueue) state.selectedClaims.delete(claimUuid);
+          const actionLabel = canQueue
+            ? (stages.report.label === 'Completed' ? 'Requeue Claim'
+              : (Number(item.extraction_failed || 0) > 0 ? 'Retry Queue' : 'Queue Claim'))
+            : (stages.report.label === 'Completed' ? 'Report Ready'
+              : (stages.structure.label === 'Completed' ? 'Structured'
+                : (stages.extraction.label === 'Completed' ? 'Extracted' : stages.extraction.label)));
+          return '<tr>'
+            + '<td><input type="checkbox" data-ai-queue-select value="' + escapeHtml(claimUuid) + '" aria-label="Select claim ' + escapeHtml(claimId) + '"' + (canQueue ? '' : ' disabled') + (state.selectedClaims.has(claimUuid) ? ' checked' : '') + '></td>'
+            + '<td><code>' + escapeHtml(claimId) + '</code></td>'
+            + '<td>' + escapeHtml(formatAssignedDoctor(item.assigned_doctor_id || '')) + '</td>'
+            + '<td>' + escapeHtml(String(docs)) + '</td>'
+            + '<td>' + escapeHtml(String(sourceFiles)) + '</td>'
+            + '<td>' + renderStageCell(stages.extraction) + '</td>'
+            + '<td>' + renderStageCell(stages.structure) + '</td>'
+            + '<td>' + renderStageCell(stages.report) + '</td>'
+            + '<td>' + statusChip(verifaiLabel) + (item.verifai_status ? '<div class="muted" style="margin-top:4px;">' + escapeHtml(String(item.verifai_status || '') + (item.verifai_stage ? (' / ' + String(item.verifai_stage || '')) : '')) + '</div>' : '') + '</td>'
+            + '<td><button type="button" class="btn-soft" data-ai-queue-claim="' + escapeHtml(claimUuid) + '" data-ai-queue-claim-label="' + escapeHtml(claimId) + '"' + (canQueue ? '' : ' disabled') + '>' + escapeHtml(actionLabel) + '</button></td>'
+            + '</tr>';
+        }).join('');
+        tbody.innerHTML = rows || '<tr><td colspan="10">No claims found for this queue.</td></tr>';
+        tbody.querySelectorAll('input[data-ai-queue-select]').forEach(function (box) {
+          box.addEventListener('change', function () {
+            const claimUuid = String(this.value || '').trim();
+            if (!claimUuid) return;
+            if (this.checked && state.selectedClaims.size >= 100 && !state.selectedClaims.has(claimUuid)) {
+              this.checked = false;
+              setMessage('ai-queue-msg', 'err', 'A maximum of 100 claims can be queued at once.');
+            } else if (this.checked) state.selectedClaims.add(claimUuid);
+            else state.selectedClaims.delete(claimUuid);
+            updateSelectionUi();
+          });
+        });
+        tbody.querySelectorAll('button[data-ai-queue-claim]').forEach(function (btn) {
+          btn.addEventListener('click', async function () {
+            const claimUuid = String(this.getAttribute('data-ai-queue-claim') || '').trim();
+            const claimLabel = String(this.getAttribute('data-ai-queue-claim-label') || claimUuid).trim();
+            if (!claimUuid) return;
+            const original = this.textContent;
+            this.disabled = true;
+            this.textContent = 'Queueing...';
+            setMessage('ai-queue-msg', '', 'Queueing claim ' + claimLabel + '...');
+            try {
+              await apiFetch('/api/v1/claims/' + encodeURIComponent(claimUuid) + '/process', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({})
+              });
+              state.selectedClaims.delete(claimUuid);
+              setMessage('ai-queue-msg', 'ok', 'Queued claim ' + claimLabel + ' for background processing.');
+              await loadJobs(true);
+              await loadQueueClaims(false);
+            } catch (err) {
+              setMessage('ai-queue-msg', 'err', err && err.message ? err.message : 'Queue claim failed.');
+              this.disabled = false;
+              this.textContent = original || 'Queue Claim';
+            }
+          });
+        });
+        updateSelectionUi();
+        updatePaginationUi();
+      } catch (err) {
+        state.total = 0;
+        tbody.innerHTML = '<tr><td colspan="10">Failed to load AI queue.</td></tr>';
+        updateSelectionUi();
+        updatePaginationUi();
+        setMessage('ai-queue-msg', 'err', err && err.message ? err.message : 'Failed to load AI queue.');
+      }
+    }
+
+    async function loadJobs(resetPage) {
+      if (resetPage) state.jobPage = 1;
+      state.jobStatusFilter = String(jobStatusEl.value || 'all').trim();
+      if (resetPage && (!jobTbody.innerHTML || !jobTbody.querySelector('tr'))) {
+        jobTbody.innerHTML = '<tr><td colspan="7">Loading...</td></tr>';
+      }
+
+      const params = new URLSearchParams();
+      params.set('limit', String(state.jobPageSize));
+      params.set('offset', String((state.jobPage - 1) * state.jobPageSize));
+      params.set('status_filter', state.jobStatusFilter || 'all');
+
+      try {
+        const result = await apiFetch('/api/v1/extraction-jobs?' + params.toString());
+        const items = Array.isArray(result) ? result : (Array.isArray(result && result.items) ? result.items : []);
+        state.jobTotal = Array.isArray(result) ? items.length : Number(result && result.total ? result.total : 0);
+        const counts = result && !Array.isArray(result) && result.status_counts ? result.status_counts : {};
+        if (queuedStatEl) queuedStatEl.textContent = String(Number(counts.queued || 0));
+        if (runningStatEl) runningStatEl.textContent = String(Number(counts.running || 0));
+        if (succeededStatEl) succeededStatEl.textContent = String(Number(counts.succeeded || 0));
+        if (failedStatEl) failedStatEl.textContent = String(Number(counts.failed || 0));
+        jobTbody.innerHTML = renderJobRows(items);
+        updateJobPaginationUi();
+      } catch (err) {
+        if (resetPage) {
+          state.jobTotal = 0;
+          jobTbody.innerHTML = '<tr><td colspan="7">Failed to load extraction jobs.</td></tr>';
+        }
+        updateJobPaginationUi();
+      }
+    }
+
+    function startJobPolling() {
+      if (jobPollTimer) clearInterval(jobPollTimer);
+      jobPollTimer = setInterval(function () {
+        loadJobs(false).catch(function () {});
+      }, 5000);
+    }
+
+    if (selectVisibleEl) {
+      selectVisibleEl.addEventListener('change', function () {
+        const boxes = Array.from(tbody.querySelectorAll('input[data-ai-queue-select]:not(:disabled)'));
+        boxes.forEach(function (box) {
+          const claimUuid = String(box.value || '').trim();
+          if (!claimUuid) return;
+          if (selectVisibleEl.checked && state.selectedClaims.size < 100) state.selectedClaims.add(claimUuid);
+          else if (!selectVisibleEl.checked) state.selectedClaims.delete(claimUuid);
+        });
+        updateSelectionUi();
+      });
+    }
+
+    if (selectPageBtn) {
+      selectPageBtn.addEventListener('click', function () {
+        Array.from(tbody.querySelectorAll('input[data-ai-queue-select]:not(:disabled)')).forEach(function (box) {
+          const claimUuid = String(box.value || '').trim();
+          if (claimUuid && state.selectedClaims.size < 100) state.selectedClaims.add(claimUuid);
+        });
+        updateSelectionUi();
+      });
+    }
+
+    if (clearSelectionBtn) {
+      clearSelectionBtn.addEventListener('click', function () {
+        state.selectedClaims.clear();
+        updateSelectionUi();
+      });
+    }
+
+    if (bulkSubmitBtn) {
+      bulkSubmitBtn.addEventListener('click', async function () {
+        const claimIds = Array.from(state.selectedClaims).slice(0, 100);
+        if (!claimIds.length) return;
+        const originalText = bulkSubmitBtn.textContent;
+        bulkSubmitBtn.disabled = true;
+        bulkSubmitBtn.textContent = 'Queueing ' + claimIds.length + '...';
+        setMessage('ai-queue-msg', '', 'Queueing ' + claimIds.length + ' selected claim(s)...');
+        try {
+          const result = await apiFetch('/api/v1/claims/claims/bulk/process', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ claim_ids: claimIds, force_refresh: false }),
+          });
+          const queuedClaims = Number(result && result.queued_claims || 0);
+          const queuedDocuments = Number(result && result.total_documents_queued || 0);
+          const failedClaims = Number(result && result.failed_claims || 0);
+          state.selectedClaims.clear();
+          setMessage(
+            'ai-queue-msg',
+            queuedClaims > 0 ? 'ok' : 'err',
+            'Bulk queue complete: ' + queuedClaims + ' claim(s), ' + queuedDocuments + ' document(s) queued'
+              + (failedClaims ? ', ' + failedClaims + ' failed.' : '.'),
+          );
+          await loadJobs(true);
+          await loadQueueClaims(false);
+        } catch (err) {
+          setMessage('ai-queue-msg', 'err', err && err.message ? err.message : 'Bulk queue failed.');
+        } finally {
+          bulkSubmitBtn.textContent = originalText || 'Queue Selected (0)';
+          updateSelectionUi();
+        }
+      });
+    }
+
+    form.addEventListener('submit', async function (e) {
+      e.preventDefault();
+      await loadQueueClaims(true);
+    });
+
+    if (resetBtn) {
+      resetBtn.addEventListener('click', async function () {
+        searchEl.value = '';
+        doctorEl.value = '';
+        statusEl.value = 'all';
+        pipelineStatusEl.value = 'all';
+        await loadQueueClaims(true);
+      });
+    }
+
+    if (pageSizeEl) {
+      pageSizeEl.addEventListener('change', async function () {
+        state.pageSize = Math.max(1, Number(pageSizeEl.value || 10));
+        await loadQueueClaims(true);
+      });
+    }
+
+    if (prevBtn) {
+      prevBtn.addEventListener('click', async function () {
+        if (state.page <= 1) return;
+        state.page -= 1;
+        await loadQueueClaims(false);
+      });
+    }
+
+    if (nextBtn) {
+      nextBtn.addEventListener('click', async function () {
+        const maxPage = Math.max(1, Math.ceil((state.total || 0) / Math.max(1, state.pageSize)));
+        if (state.page >= maxPage) return;
+        state.page += 1;
+        await loadQueueClaims(false);
+      });
+    }
+
+    if (jobStatusEl) {
+      jobStatusEl.addEventListener('change', async function () {
+        await loadJobs(true);
+      });
+    }
+
+    if (jobPrevBtn) {
+      jobPrevBtn.addEventListener('click', async function () {
+        if (state.jobPage <= 1) return;
+        state.jobPage -= 1;
+        await loadJobs(false);
+      });
+    }
+
+    if (jobNextBtn) {
+      jobNextBtn.addEventListener('click', async function () {
+        const maxPage = Math.max(1, Math.ceil((state.jobTotal || 0) / Math.max(1, state.jobPageSize)));
+        if (state.jobPage >= maxPage) return;
+        state.jobPage += 1;
+        await loadJobs(false);
+      });
+    }
+
+    await loadQueueClaims(true);
+    await loadJobs(true);
+    startJobPolling();
+  }
+
   async function renderWithdrawnClaims() {
     const doctors = await fetchDoctors();
     const doctorFilterOptions = '<option value="">All Doctors</option>'
@@ -10047,6 +10581,7 @@ async function renderLegacyMigration() {
     if (page === 'upload-excel') return renderUploadExcel();
     if (page === 'assign-cases') return renderAssignCases();
     if (page === 'upload-document') return renderUploadDocument();
+    if (page === 'ai-queue') return renderAIQueue();
 
     if (page === 'withdrawn-claims') return renderWithdrawnClaims();
 

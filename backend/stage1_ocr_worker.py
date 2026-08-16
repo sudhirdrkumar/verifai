@@ -7,8 +7,8 @@ import redis
 import psycopg
 import base64
 import logging
+import mimetypes
 import requests
-from datetime import datetime
 from dotenv import load_dotenv
 
 # Load .env file
@@ -25,7 +25,9 @@ S3_BUCKET = os.getenv('S3_BUCKET', 'rightworks-docs')
 S3_ACCESS_KEY = os.getenv('S3_ACCESS_KEY')
 S3_SECRET_KEY = os.getenv('S3_SECRET_KEY')
 OPENAI_API_KEY = os.getenv('OPENAI_API_KEY')
-MAX_BATCH_SIZE = 7 * 1024 * 1024  # 7MB
+OPENAI_MODEL = os.getenv('OPENAI_VISION_MODEL', 'gpt-4o-mini')
+OPENAI_MAX_FILE_BYTES = int(os.getenv('OPENAI_MAX_FILE_BYTES', 20 * 1024 * 1024))
+OPENAI_MAX_OUTPUT_TOKENS = int(os.getenv('OPENAI_MAX_OUTPUT_TOKENS', 16000))
 
 r = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, decode_responses=True, socket_keepalive=True)
 
@@ -64,109 +66,86 @@ def get_file_size_s3(bucket, key, retries=3):
                 return None
     return None
 
-def extract_with_openai_vision(file_data_list):
-    """
-    Send files to OpenAI Vision for text extraction with 7MB batching
-    file_data_list: list of (filename, base64_data, mime_type)
-    """
+def extract_with_openai_vision(bucket, key, file_size):
+    """Extract one PDF/image through the OpenAI Responses API."""
     if not OPENAI_API_KEY:
         logger.warning('OPENAI_API_KEY not set, skipping OpenAI extraction')
         return None
+    if file_size > OPENAI_MAX_FILE_BYTES:
+        logger.info(
+            'Skipping OpenAI for %s: %.2fMB exceeds %.2fMB limit',
+            key,
+            file_size / 1024 / 1024,
+            OPENAI_MAX_FILE_BYTES / 1024 / 1024,
+        )
+        return None
+
+    mime_type = mimetypes.guess_type(key)[0] or 'application/octet-stream'
+    if mime_type != 'application/pdf' and not mime_type.startswith('image/'):
+        logger.info('Skipping OpenAI for unsupported media type %s', mime_type)
+        return None
 
     try:
-        # Batch files by 7MB
-        batches = []
-        current_batch = []
-        current_size = 0
+        file_bytes = s3.get_object(Bucket=bucket, Key=key)['Body'].read()
+        data_url = f'data:{mime_type};base64,{base64.b64encode(file_bytes).decode("ascii")}'
+        file_name = key.rsplit('/', 1)[-1] or 'claim-document'
+        file_part = (
+            {'type': 'input_file', 'filename': file_name, 'file_data': data_url}
+            if mime_type == 'application/pdf'
+            else {'type': 'input_image', 'image_url': data_url}
+        )
+        payload = {
+            'model': OPENAI_MODEL,
+            'input': [{
+                'role': 'user',
+                'content': [
+                    {
+                        'type': 'input_text',
+                        'text': (
+                            'Extract all readable text from this medical claim document. '
+                            'Preserve headings, table rows, dates, medicine names, investigation '
+                            'values, units, and reference ranges. Return extracted text only.'
+                        ),
+                    },
+                    file_part,
+                ],
+            }],
+            'max_output_tokens': OPENAI_MAX_OUTPUT_TOKENS,
+        }
+        response = requests.post(
+            'https://api.openai.com/v1/responses',
+            headers={
+                'Authorization': f'Bearer {OPENAI_API_KEY}',
+                'Content-Type': 'application/json',
+            },
+            json=payload,
+            timeout=180,
+        )
+        if response.status_code != 200:
+            logger.warning('OpenAI API error %s: %s', response.status_code, response.text[:500])
+            return None
 
-        for filename, data_base64, mime_type in file_data_list:
-            # Calculate size of base64 data
-            file_size = len(data_base64.encode('utf-8'))
-
-            # If file is larger than 7MB, send alone
-            if file_size > MAX_BATCH_SIZE:
-                if current_batch:
-                    batches.append(current_batch)
-                    current_batch = []
-                    current_size = 0
-                batches.append([(filename, data_base64, mime_type)])
-                logger.info(f'Large file {filename} ({file_size / 1024 / 1024:.1f}MB) will be sent alone')
-            # If adding to current batch would exceed 7MB, start new batch
-            elif current_size + file_size > MAX_BATCH_SIZE:
-                batches.append(current_batch)
-                current_batch = [(filename, data_base64, mime_type)]
-                current_size = file_size
-            # Add to current batch
-            else:
-                current_batch.append((filename, data_base64, mime_type))
-                current_size += file_size
-
-        # Add remaining batch
-        if current_batch:
-            batches.append(current_batch)
-
-        logger.info(f'Split {len(file_data_list)} files into {len(batches)} batches')
-
-        # Process each batch
-        all_results = []
-        for batch_num, batch in enumerate(batches, 1):
-            logger.info(f'Processing batch {batch_num}/{len(batches)} ({sum(len(f[1].encode("utf-8")) for f in batch) / 1024 / 1024:.1f}MB)')
-
-            content = [
-                {"type": "text", "text": "Extract ALL text from these medical documents. Return the complete extracted text only."}
-            ]
-
-            for filename, data_base64, mime_type in batch:
-                if mime_type == 'application/pdf':
-                    content.append({
-                        "type": "file",
-                        "source": {
-                            "type": "base64",
-                            "media_type": "application/pdf",
-                            "data": data_base64
-                        }
-                    })
-                logger.info(f'  Added {filename} to batch')
-
-            headers = {
-                "Authorization": f"Bearer {OPENAI_API_KEY}",
-                "Content-Type": "application/json"
-            }
-
-            payload = {
-                "model": "gpt-4o",
-                "messages": [{"role": "user", "content": content}],
-                "max_tokens": 4096
-            }
-
-            response = requests.post(
-                "https://api.openai.com/v1/chat/completions",
-                headers=headers,
-                json=payload,
-                timeout=120
-            )
-
-            if response.status_code == 200:
-                result = response.json()
-                extracted_text = result['choices'][0]['message']['content']
-                logger.info(f'✅ Batch {batch_num} extraction successful: {len(extracted_text)} chars')
-                all_results.append(extracted_text)
-            else:
-                logger.error(f'OpenAI API error: {response.status_code} - {response.text}')
-                return None
-
-        # Combine all batch results
-        final_text = '\n'.join(all_results) if all_results else None
-        return final_text
-
+        output_parts = []
+        for item in response.json().get('output', []):
+            if item.get('type') != 'message':
+                continue
+            for part in item.get('content', []):
+                if part.get('type') == 'output_text' and part.get('text'):
+                    output_parts.append(part['text'])
+        extracted_text = '\n'.join(output_parts).strip()
+        if extracted_text:
+            logger.info('OpenAI %s extracted %s chars from %s', OPENAI_MODEL, len(extracted_text), key)
+            return extracted_text
+        logger.warning('OpenAI returned no output text for %s', key)
+        return None
     except Exception as e:
-        logger.error(f'OpenAI extraction failed: {e}')
+        logger.warning('OpenAI extraction failed for %s: %s', key, e)
         return None
 
 def extract_with_textract(bucket, key):
     """Fallback: Use AWS Textract for text extraction"""
     try:
-        logger.info(f'Fallback to Textract for {key}')
+        logger.info(f'Running Textract for {key}')
 
         resp = textract.start_document_text_detection(
             DocumentLocation={'S3Object': {'Bucket': bucket, 'Name': key}}
@@ -208,27 +187,122 @@ def extract_with_textract(bucket, key):
         logger.error(f'Textract extraction failed: {e}')
         return None
 
-def update_extraction_job(doc_id, status, error_msg=None):
+def update_extraction_job(doc_id, status, error_msg=None, job_id=None):
     try:
         conn = psycopg.connect(DB_DSN)
         cur = conn.cursor()
+        target_job_sql = '''
+            id = COALESCE(
+                %s::uuid,
+                (
+                    SELECT id FROM extraction_jobs
+                    WHERE document_id = %s AND status IN ('queued', 'processing')
+                    ORDER BY queued_at DESC NULLS LAST, created_at DESC
+                    LIMIT 1
+                )
+            )
+        '''
         if status == 'processing':
-            cur.execute('UPDATE extraction_jobs SET status = %s, started_at = NOW() WHERE document_id = %s AND status = %s',
-                       ('processing', doc_id, 'queued'))
+            cur.execute(
+                f"UPDATE extraction_jobs SET status = %s, started_at = NOW() WHERE {target_job_sql} AND status = 'queued'",
+                ('processing', job_id, doc_id),
+            )
         elif status == 'succeeded':
-            cur.execute('UPDATE extraction_jobs SET status = %s, finished_at = NOW() WHERE document_id = %s',
-                       ('succeeded', doc_id))
+            cur.execute(
+                f'UPDATE extraction_jobs SET status = %s, finished_at = NOW(), error_message = NULL WHERE {target_job_sql}',
+                ('succeeded', job_id, doc_id),
+            )
         elif status == 'failed':
-            cur.execute('UPDATE extraction_jobs SET status = %s, finished_at = NOW(), error_message = %s WHERE document_id = %s',
-                       ('failed', error_msg, doc_id))
+            cur.execute(
+                f'UPDATE extraction_jobs SET status = %s, finished_at = NOW(), error_message = %s WHERE {target_job_sql}',
+                ('failed', error_msg, job_id, doc_id),
+            )
         conn.commit()
         cur.close()
         conn.close()
     except Exception as e:
         logger.error(f'Failed to update extraction job: {str(e)}')
 
+
+def get_document_state(doc_id):
+    """Resolve canonical storage metadata and detect completed OCR."""
+    with psycopg.connect(DB_DSN) as conn:
+        with conn.cursor() as cur:
+            cur.execute('''
+                SELECT cd.claim_id, cd.storage_key, cd.parse_status,
+                       EXISTS (
+                           SELECT 1 FROM document_extractions de
+                           WHERE de.document_id = cd.id
+                       ) AS has_extraction
+                FROM claim_documents cd
+                WHERE cd.id = %s
+            ''', (doc_id,))
+            row = cur.fetchone()
+    if not row:
+        return None
+    return {
+        'claim_id': str(row[0]),
+        'storage_key': str(row[1] or ''),
+        'parse_status': str(row[2] or ''),
+        'has_extraction': bool(row[3]) or str(row[2] or '').lower() == 'succeeded',
+    }
+
+
+def normalize_s3_location(storage_key, default_bucket):
+    key = str(storage_key or '').strip()
+    bucket = str(default_bucket or S3_BUCKET).strip() or S3_BUCKET
+    if key.startswith('s3://'):
+        location = key[5:].split('/', 1)
+        bucket = location[0]
+        key = location[1] if len(location) > 1 else ''
+    return bucket, key
+
+
+def queue_stage2_if_ready(claim_id):
+    """Queue one Gemini pass only after every claim document has OCR text."""
+    with psycopg.connect(DB_DSN) as conn:
+        with conn.cursor() as cur:
+            cur.execute('''
+                SELECT COUNT(*), COUNT(*) FILTER (
+                    WHERE EXISTS (
+                        SELECT 1 FROM document_extractions de
+                        WHERE de.document_id = cd.id
+                    )
+                    AND COALESCE(
+                        (
+                            SELECT ej.status FROM extraction_jobs ej
+                            WHERE ej.document_id = cd.id
+                            ORDER BY ej.queued_at DESC NULLS LAST, ej.created_at DESC
+                            LIMIT 1
+                        ),
+                        'succeeded'
+                    ) = 'succeeded'
+                )
+                FROM claim_documents cd
+                WHERE cd.claim_id = %s
+            ''', (claim_id,))
+            total_documents, extracted_documents = cur.fetchone()
+
+    if not total_documents or extracted_documents < total_documents:
+        logger.info(
+            'Claim %s waiting for remaining OCR documents (%s/%s)',
+            claim_id,
+            extracted_documents,
+            total_documents,
+        )
+        return False
+
+    schedule_key = f'queue:stage2_scheduled:{claim_id}'
+    if not r.set(schedule_key, '1', nx=True, ex=21600):
+        logger.info('Stage 2 already scheduled for claim %s', claim_id)
+        return False
+
+    r.lpush('queue:stage2_claim_reduction', json.dumps({'claim_id': claim_id}))
+    logger.info('Queued one Stage 2 job for completed claim %s', claim_id)
+    return True
+
 def run_stage1_loop():
-    logger.info('Stage 1 OCR Worker Active - OpenAI Vision (primary) + Textract (fallback)')
+    logger.info('Stage 1 OCR Worker Active - OpenAI primary, AWS Textract fallback')
 
     while True:
         try:
@@ -237,13 +311,37 @@ def run_stage1_loop():
                 continue
 
             task = json.loads(raw_task[1])
-            doc_id = task['document_id']
-            claim_id = task['claim_id']
-            s3_bucket = task.get('s3_bucket', S3_BUCKET)
-            s3_key = task['s3_key']
+            doc_id = str(task.get('document_id') or '').strip()
+            job_id = str(task.get('job_id') or '').strip() or None
+            force_refresh = bool(task.get('force_refresh', False))
+            if not doc_id:
+                logger.error('Discarding Stage 1 task without document_id: %s', task)
+                continue
+
+            document_state = get_document_state(doc_id)
+            if not document_state:
+                logger.error('Discarding Stage 1 task for missing document %s', doc_id)
+                continue
+
+            claim_id = str(task.get('claim_id') or document_state['claim_id'])
+            s3_bucket, s3_key = normalize_s3_location(
+                task.get('s3_key') or document_state['storage_key'],
+                task.get('s3_bucket') or S3_BUCKET,
+            )
+            if not s3_key:
+                error_msg = 'Document storage_key is missing'
+                logger.error('%s for document %s', error_msg, doc_id)
+                update_extraction_job(doc_id, 'failed', error_msg, job_id)
+                continue
+
+            if document_state['has_extraction'] and not force_refresh:
+                logger.info('Skipping already-extracted document %s', doc_id)
+                update_extraction_job(doc_id, 'succeeded', job_id=job_id)
+                queue_stage2_if_ready(claim_id)
+                continue
 
             logger.info(f'Processing Document {doc_id} from claim {claim_id}')
-            update_extraction_job(doc_id, 'processing')
+            update_extraction_job(doc_id, 'processing', job_id=job_id)
 
             try:
                 # Get file size
@@ -253,21 +351,14 @@ def run_stage1_loop():
 
                 logger.info(f'File size: {file_size / 1024 / 1024:.2f}MB')
 
-                # Download and prepare file for OpenAI
-                response = s3.get_object(Bucket=s3_bucket, Key=s3_key)
-                file_content = response['Body'].read()
-                file_base64 = base64.b64encode(file_content).decode('utf-8')
-
-                # Try OpenAI Vision first
-                extracted_text = extract_with_openai_vision([(s3_key, file_base64, 'application/pdf')])
-
-                # Fallback to Textract if OpenAI fails
+                extracted_text = extract_with_openai_vision(s3_bucket, s3_key, file_size)
+                extraction_model = OPENAI_MODEL
                 if not extracted_text:
-                    logger.warning(f'OpenAI extraction failed, falling back to Textract')
+                    logger.info('Falling back to Textract for %s', s3_key)
                     extracted_text = extract_with_textract(s3_bucket, s3_key)
-
+                    extraction_model = 'aws_textract'
                 if not extracted_text:
-                    raise Exception('Both OpenAI and Textract extraction failed')
+                    raise Exception('OpenAI and AWS Textract extraction failed')
 
                 # Clean and compress
                 compressed_text = clean_and_compress_ocr(extracted_text)
@@ -281,25 +372,25 @@ def run_stage1_loop():
                     INSERT INTO document_extractions (document_id, claim_id, extraction_version, model_name, extracted_entities, raw_response, created_at)
                     VALUES (%s, %s, %s, %s, %s, %s, NOW())
                     ON CONFLICT (document_id, extraction_version) DO UPDATE SET
-                        raw_response = EXCLUDED.raw_response
-                ''', (doc_id, claim_id, 'stage1_ocr_v2', 'openai_vision_textract', '{}', compressed_text))
+                        model_name = EXCLUDED.model_name,
+                        raw_response = EXCLUDED.raw_response,
+                        created_at = NOW()
+                ''', (doc_id, claim_id, 'stage1_ocr_v2', extraction_model, '{}', compressed_text))
 
                 cur.execute('UPDATE claim_documents SET parse_status = %s WHERE id = %s', ('succeeded', doc_id))
                 conn.commit()
                 cur.close()
                 conn.close()
 
-                update_extraction_job(doc_id, 'succeeded')
+                update_extraction_job(doc_id, 'succeeded', job_id=job_id)
                 logger.info(f'Document {doc_id} processing completed')
 
-                # Trigger Stage 2
-                r.lpush('queue:stage2_claim_reduction', json.dumps({'claim_id': claim_id}))
-                logger.info(f'Queued Stage 2 for claim {claim_id}')
+                queue_stage2_if_ready(claim_id)
 
             except Exception as e:
                 error_msg = str(e)
                 logger.error(f'Stage 1 Error on Document {doc_id}: {error_msg}', exc_info=True)
-                update_extraction_job(doc_id, 'failed', error_msg)
+                update_extraction_job(doc_id, 'failed', error_msg, job_id)
 
         except redis.exceptions.TimeoutError:
             continue

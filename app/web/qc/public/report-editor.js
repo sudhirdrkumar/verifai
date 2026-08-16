@@ -215,9 +215,9 @@
   }
 
   async function fetchLatestReportHtml(params) {
-    if (!params.claimUuid) return { html: '', createdAt: '', createdAtMs: 0 };
+    if (!params.claimUuid) return { html: '', createdAt: '', createdAtMs: 0, versionNo: 0, source: '' };
 
-    const sources = ['doctor', 'system', 'any'];
+    const sources = ['edited', 'auditor', 'doctor', 'system', 'any'];
     for (let i = 0; i < sources.length; i += 1) {
       const src = sources[i];
       try {
@@ -225,13 +225,92 @@
         const html = normalizeHealthClaimReportTitle(String(body && body.report_html ? body.report_html : '').trim());
         if (html) {
           const createdAt = String((body && body.created_at) || '').trim();
-          return { html: html, createdAt: createdAt, createdAtMs: parseCreatedAtMs(createdAt) };
+          return {
+            html: html,
+            createdAt: createdAt,
+            createdAtMs: parseCreatedAtMs(createdAt),
+            versionNo: Number((body && body.version_no) || 0),
+            source: String((body && body.report_source) || src || ''),
+          };
         }
       } catch (_err) {
       }
     }
 
-    return { html: '', createdAt: '', createdAtMs: 0 };
+    return { html: '', createdAt: '', createdAtMs: 0, versionNo: 0, source: '' };
+  }
+
+  function reportVersionLabel(item) {
+    const source = String((item && item.report_source) || 'doctor').toLowerCase();
+    const sourceLabels = {
+      system: 'Auto-generated',
+      doctor: 'Doctor saved',
+      auditor: 'Auditor saved',
+      edited: 'Final edited',
+    };
+    const versionNo = Number((item && item.version_no) || 0);
+    const actor = String((item && item.created_by) || '')
+      .replace(/^(system|auditor|edited):/i, '')
+      .trim();
+    const stamp = formatDateTime((item && item.created_at) || '');
+    return 'v' + String(versionNo || '-')
+      + ' - ' + String(sourceLabels[source] || source)
+      + (actor ? (' - ' + actor) : '')
+      + (stamp ? (' - ' + stamp) : '');
+  }
+
+  async function loadReportVersions(params, selectedValue, includeDraft) {
+    const select = document.getElementById('report-version-select');
+    if (!select || !params.claimUuid) return;
+
+    const body = await apiFetch('/api/v1/user-tools/completed-reports/' + encodeURIComponent(params.claimUuid) + '/versions');
+    const items = Array.isArray(body && body.items) ? body.items : [];
+    select.innerHTML = '';
+
+    if (includeDraft) {
+      const draftOption = document.createElement('option');
+      draftOption.value = 'draft';
+      draftOption.textContent = 'Generated report - current draft';
+      select.appendChild(draftOption);
+    }
+
+    items.forEach(function (item) {
+      const option = document.createElement('option');
+      option.value = String(Number(item && item.version_no ? item.version_no : 0));
+      option.textContent = reportVersionLabel(item);
+      select.appendChild(option);
+    });
+
+    if (!select.options.length) {
+      const emptyOption = document.createElement('option');
+      emptyOption.value = '';
+      emptyOption.textContent = 'No saved versions';
+      select.appendChild(emptyOption);
+    }
+
+    const target = String(selectedValue || '').trim();
+    if (target && Array.from(select.options).some(function (option) { return option.value === target; })) {
+      select.value = target;
+    } else if (includeDraft) {
+      select.value = 'draft';
+    }
+    select.disabled = false;
+  }
+
+  async function loadExactReportVersion(params, versionNo) {
+    const normalizedVersion = Number(versionNo || 0);
+    if (!params.claimUuid || !Number.isInteger(normalizedVersion) || normalizedVersion < 1) {
+      throw new Error('Invalid report version.');
+    }
+    const body = await apiFetch(
+      '/api/v1/user-tools/completed-reports/' + encodeURIComponent(params.claimUuid)
+        + '/versions/' + encodeURIComponent(String(normalizedVersion))
+    );
+    const html = normalizeHealthClaimReportTitle(String(body && body.report_html ? body.report_html : '').trim());
+    if (!html) throw new Error('Selected report version is empty.');
+    const editor = getEditor();
+    if (editor) editor.innerHTML = html;
+    return body;
   }
 
   const docSelectEl = document.getElementById('doc-select');
@@ -620,9 +699,11 @@
     const saveBtn = document.getElementById('save-report-btn');
     const saveCompleteBtn = document.getElementById('save-complete-btn');
     const reloadBtn = document.getElementById('reload-draft-btn');
+    const versionSelect = document.getElementById('report-version-select');
     if (saveBtn) saveBtn.disabled = !!busy;
     if (saveCompleteBtn) saveCompleteBtn.disabled = !!busy;
     if (reloadBtn) reloadBtn.disabled = !!busy;
+    if (versionSelect) versionSelect.disabled = !!busy;
     setDocControlsDisabled(!!busy);
   }
 
@@ -632,19 +713,16 @@
     if (titleEl && params.title) titleEl.textContent = params.title;
 
     const loadedDraft = loadDraft(params);
-    const fallback = await fetchLatestReportHtml(params);
     const editor = getEditor();
-    const draftMeta = window.__qcReportDraftMeta || null;
-    const draftCreatedAtMs = parseCreatedAtMs(draftMeta && draftMeta.created_at);
+    let selectedVersion = loadedDraft ? 'draft' : '';
 
-    if (loadedDraft && fallback.html && fallback.createdAtMs > (draftCreatedAtMs + 1000)) {
-      if (editor) editor.innerHTML = fallback.html;
-      setStatus('Loaded newer saved report.', 'ok');
-    } else if (!loadedDraft) {
+    if (!loadedDraft) {
       setStatus('Draft missing, loading latest saved report...', '');
+      const fallback = await fetchLatestReportHtml(params);
       if (editor) {
         if (fallback.html) {
           editor.innerHTML = fallback.html;
+          selectedVersion = fallback.versionNo ? String(fallback.versionNo) : '';
           setStatus('Loaded latest saved report.', 'ok');
         } else {
           editor.innerHTML = '<p style="color:#8a94a6;">No report content found. Please click Generate Report again from case detail.</p>';
@@ -652,7 +730,14 @@
         }
       }
     } else {
-      setStatus('Draft loaded. You can edit and save.', 'ok');
+      setStatus('Generated report loaded. You can edit and save.', 'ok');
+    }
+
+    try {
+      await loadReportVersions(params, selectedVersion, loadedDraft);
+    } catch (_versionErr) {
+      const versionSelect = document.getElementById('report-version-select');
+      if (versionSelect) versionSelect.disabled = true;
     }
 
     await loadDocuments(params);
@@ -683,6 +768,7 @@
         setStatus('Saving report...', '');
         try {
           const saved = await saveReport(params, 'draft');
+          await loadReportVersions(params, String(saved && saved.version_no ? saved.version_no : ''), true).catch(function () {});
           setStatus('Saved successfully. Version: ' + String(saved && saved.version_no ? saved.version_no : '-'), 'ok');
           emitClaimEvent(params, 'report-saved-from-tab');
         } catch (err) {
@@ -700,6 +786,7 @@
         setStatus('Saving report and marking completed...', '');
         try {
           const saved = await saveReport(params, 'completed');
+          await loadReportVersions(params, String(saved && saved.version_no ? saved.version_no : ''), true).catch(function () {});
           await updateClaimStatusCompleted(params);
           setStatus('Saved (v' + String(saved && saved.version_no ? saved.version_no : '-') + ') and status changed to completed.', 'ok');
           emitClaimEvent(params, 'report-saved-from-tab');
@@ -725,21 +812,17 @@
     if (reloadBtn) {
       reloadBtn.addEventListener('click', async function () {
         const hasDraft = loadDraft(params);
-        const fallback = await fetchLatestReportHtml(params);
         const editor = getEditor();
-        const draftMeta = window.__qcReportDraftMeta || null;
-        const draftCreatedAtMs = parseCreatedAtMs(draftMeta && draftMeta.created_at);
-
-        if (hasDraft && fallback.html && fallback.createdAtMs > (draftCreatedAtMs + 1000)) {
-          if (editor) editor.innerHTML = fallback.html;
-          setStatus('Loaded newer saved report.', 'ok');
-        } else if (hasDraft) {
-          setStatus('Draft reloaded.', 'ok');
+        if (hasDraft) {
+          setStatus('Generated report reloaded.', 'ok');
+          await loadReportVersions(params, 'draft', true);
         } else {
           setStatus('Draft not found in browser handoff. Loading latest saved...', '');
+          const fallback = await fetchLatestReportHtml(params);
           if (editor) {
             if (fallback.html) {
               editor.innerHTML = fallback.html;
+              await loadReportVersions(params, fallback.versionNo ? String(fallback.versionNo) : '', false);
               setStatus('Loaded latest saved report.', 'ok');
             } else {
               setStatus('No saved report found.', 'err');
@@ -747,6 +830,31 @@
           }
         }
         await loadDocuments(params);
+      });
+    }
+
+    const versionSelect = document.getElementById('report-version-select');
+    if (versionSelect) {
+      versionSelect.addEventListener('change', async function () {
+        const selected = String(versionSelect.value || '').trim();
+        setActionBusy(true);
+        try {
+          if (selected === 'draft') {
+            if (!loadDraft(params)) throw new Error('Generated draft is no longer available in this browser.');
+            setStatus('Generated report draft loaded.', 'ok');
+          } else {
+            const loaded = await loadExactReportVersion(params, selected);
+            setStatus(
+              'Loaded v' + String((loaded && loaded.version_no) || selected)
+                + ' (' + String((loaded && loaded.report_source) || 'saved') + ').',
+              'ok'
+            );
+          }
+        } catch (err) {
+          setStatus((err && err.message) ? err.message : 'Failed to load report version.', 'err');
+        } finally {
+          setActionBusy(false);
+        }
       });
     }
 
@@ -807,6 +915,7 @@
         setStatus('Saving report...', '');
         try {
           const saved = await saveReport(params, 'draft');
+          await loadReportVersions(params, String(saved && saved.version_no ? saved.version_no : ''), true).catch(function () {});
           setStatus('Saved successfully. Version: ' + String(saved && saved.version_no ? saved.version_no : '-'), 'ok');
         } catch (err) {
           setStatus((err && err.message) ? err.message : 'Save failed.', 'err');

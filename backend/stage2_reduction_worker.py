@@ -28,28 +28,82 @@ if not GEMINI_API_KEY:
 genai.configure(api_key=GEMINI_API_KEY)
 r = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, decode_responses=True, socket_keepalive=True)
 
+
+def report_field_text(value) -> str:
+    if value is None:
+        return ''
+    if isinstance(value, list):
+        lines = []
+        for item in value:
+            if isinstance(item, dict):
+                lines.append(' | '.join(f'{key}: {val}' for key, val in item.items() if val not in (None, '')))
+            elif str(item).strip():
+                lines.append(str(item).strip())
+        return '\n'.join(line for line in lines if line)
+    if isinstance(value, dict):
+        return '\n'.join(f'{key}: {val}' for key, val in value.items() if val not in (None, ''))
+    return str(value).strip()
+
+
+def normalize_structured_json(data: dict) -> dict:
+    normalized = dict(data or {})
+    aliases = {
+        'complaints': ('chief_complaints', 'chief_complaints_at_admission'),
+        'major_diagnostic_finding': ('major_diagnostic_findings',),
+        'findings': ('clinical_findings',),
+        'all_investigation_reports': ('investigation_reports',),
+        'daily_tpr_chart_min_max': ('daily_tpr_chart',),
+        'high_end_antibiotic_for_rejection': ('high_end_antibiotics',),
+        'claim_amount': ('claimed_amount',),
+    }
+    for target, source_keys in aliases.items():
+        if report_field_text(normalized.get(target)) not in ('', '-'):
+            continue
+        for source_key in source_keys:
+            if report_field_text(normalized.get(source_key)) not in ('', '-'):
+                normalized[target] = normalized[source_key]
+                break
+    if report_field_text(normalized.get('investigation_finding_in_details')) in ('', '-'):
+        normalized['investigation_finding_in_details'] = normalized.get('all_investigation_reports') or []
+    return normalized
+
 def extract_structured_data_gemini(ocr_text: str, claim_id: str) -> dict:
     """Extract structured medical data from OCR text using Gemini"""
     try:
         prompt = f'''Extract medical claim data from the OCR text and return ONLY valid JSON (no markdown, no extra text):
 {{
   "company_name": "insurance company name",
+  "claim_type": "Cashless, Reimbursement, or other claim type",
+  "insured_name": "insured patient name",
   "hospital_name": "hospital name",
-  "treating_doctor": "doctor name or '-' if not found",
+  "treating_doctor": "doctor name or '-'",
   "treating_doctor_registration_number": "registration number or '-'",
   "doa": "date of admission (DD-MM-YYYY)",
   "dod": "date of discharge (DD-MM-YYYY)",
-  "diagnosis": "main diagnosis or chief complaint",
-  "complaints": "patient complaints/symptoms",
-  "findings": "clinical findings",
-  "medicine_used": "list of medicines used, comma-separated",
-  "high_end_antibiotic_for_rejection": "any high-end antibiotics if mentioned",
-  "deranged_investigation": "any deranged investigation values",
-  "investigation_finding_in_details": "detailed investigation findings",
+  "diagnosis": "primary diagnosis",
+  "complaints": "chief complaints at admission only",
+  "major_diagnostic_finding": "major findings at admission or during stay",
+  "findings": "clinical examination findings and relevant vitals",
+  "alcoholism_history": "alcohol use history or '-' when not documented",
+  "all_investigation_reports": ["test | value | unit | reference range | flag"],
+  "date_wise_investigation_reports": ["DD-MM-YYYY | test | value | unit | reference range | flag"],
+  "deranged_investigation": ["DD-MM-YYYY | abnormal test | value | unit | reference range | high/low"],
+  "daily_tpr_chart_min_max": ["DD-MM-YYYY | temperature min-max | pulse min-max | BP min-max | SpO2 min-max"],
+  "medicine_used": ["medicine | strength | route | frequency | duration | evidence source"],
+  "medicine_evidence_used": "concise medicine/treatment evidence summary",
+  "high_end_antibiotic_for_rejection": "high-end antibiotics if mentioned",
+  "investigation_finding_in_details": "newline-separated complete investigation findings",
   "claim_amount": "claimed amount or total bill amount",
-  "conclusion": "conclusion or recommendation",
-  "recommendation": "final recommendation (APPROVE/REJECT/QUERY)"
+  "admission_required": "Justified, Not Justified, or Query",
+  "final_recommendation": "ADMISSIBLE, INADMISSIBLE, or QUERY",
+  "conclusion": "evidence-based claim conclusion",
+  "recommendation": "final recommendation"
 }}
+
+Use only evidence present in OCR. Do not copy insurance questionnaire options as diagnosis,
+complaints, alcoholism, or clinical findings. Keep every investigation value with its test name,
+date, unit, reference range, and abnormal flag when present. Use [] for an unavailable list and
+"-" for an unavailable scalar.
 
 OCR TEXT:
 {ocr_text}
@@ -68,7 +122,7 @@ Return ONLY the JSON object, nothing else.'''
                 response_text = response_text[4:]
             response_text = response_text.strip()
 
-        structured_data = json.loads(response_text)
+        structured_data = normalize_structured_json(json.loads(response_text))
         logger.info(f'✅ {GEMINI_MODEL} structured extraction for claim {claim_id} successful')
         return structured_data
 
@@ -83,108 +137,157 @@ Return ONLY the JSON object, nothing else.'''
 def auto_generate_report(cur, claim_id: str, structured_json: dict):
     """Auto-generate medical report for claim."""
     try:
-        structured_data = {
-            'hospital_name': structured_json.get('hospital_name', 'Not Specified'),
-            'treating_doctor': structured_json.get('treating_doctor', 'Not Specified'),
-            'diagnosis': structured_json.get('diagnosis', 'Not Specified'),
-            'complaints': structured_json.get('complaints', 'Not Specified'),
-            'medicine_used': structured_json.get('medicine_used', 'Not Specified'),
-            'claim_amount': structured_json.get('claim_amount', 'Not Specified'),
-            'conclusion': structured_json.get('conclusion', 'Not Specified'),
-        }
+        from datetime import datetime as dt
 
-        text_report = f"""
-{'='*70}
-MEDICAL CLAIM REPORT - AUTO GENERATED
-{'='*70}
-Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
-Report Type: AI-Generated ({GEMINI_MODEL})
-{'='*70}
+        # Extract all fields with defaults
+        company_name = structured_json.get('company_name', 'Medi Assist Insurance TPA Pvt. Ltd.')
+        claim_number = structured_json.get('claim_number', '-')
+        claim_type = structured_json.get('claim_type', 'Cashless')
+        insured_name = structured_json.get('insured_name', '-')
+        hospital_name = structured_json.get('hospital_name', '-')
+        treating_doctor = structured_json.get('treating_doctor', '-')
+        doctor_registration = structured_json.get('treating_doctor_registration_number', '-')
+        doa = structured_json.get('doa', '-')
+        dod = structured_json.get('dod', '-')
 
-FACILITY & PROVIDER INFORMATION
-{'-'*70}
-Hospital:          {structured_data['hospital_name']}
-Treating Doctor:   {structured_data['treating_doctor']}
+        # Calculate length of stay
+        length_of_stay = structured_json.get('length_of_stay_days', '')
+        if not length_of_stay and doa != '-' and dod != '-':
+            try:
+                from datetime import datetime
+                doa_dt = datetime.strptime(doa, '%d-%m-%Y')
+                dod_dt = datetime.strptime(dod, '%d-%m-%Y')
+                los = (dod_dt - doa_dt).days
+                length_of_stay = f'{los} day(s)'
+            except:
+                length_of_stay = '-'
 
-CLINICAL DETAILS
-{'-'*70}
-Diagnosis:         {structured_data['diagnosis']}
-Complaints:        {structured_data['complaints']}
-Medications:       {structured_data['medicine_used']}
+        diagnosis = structured_json.get('diagnosis', '-')
+        chief_complaints = structured_json.get('chief_complaints', '-')
+        major_findings = structured_json.get('major_diagnostic_findings', '-')
+        alcoholism_history = structured_json.get('alcoholism_history', 'NAD')
+        clinical_findings = structured_json.get('clinical_findings', '-')
+        investigation_reports = structured_json.get('investigation_reports', '-')
+        deranged_investigation = structured_json.get('deranged_investigation', 'No deranged investigation values found.')
+        daily_tpr = structured_json.get('daily_tpr_chart', '-')
+        medicine_used = structured_json.get('medicine_used', '-')
+        claimed_amount = structured_json.get('claimed_amount', '-')
+        conclusion = structured_json.get('conclusion', '-')
+        recommendation = structured_json.get('recommendation', 'QUERY')
+        query_reason = structured_json.get('query_reason', '')
 
-CLAIM DETAILS
-{'-'*70}
-Claim Amount:      ₹{structured_data['claim_amount']}
+        # Generate HTML in HEALTH CLAIM ASSESSMENT SHEET format matching the PDF
+        gen_time = dt.now().strftime('%m/%d/%Y, %I:%M:%S %p')
 
-CONCLUSION
-{'-'*70}
-{structured_data['conclusion']}
+        html_report = f"""<div style="font-family: Arial, Helvetica, sans-serif; font-size: 12px; line-height: 1.4; padding: 15px;">
+<h1 style="text-align: center; font-size: 16px; font-weight: bold; margin: 10px 0;">HEALTH CLAIM ASSESSMENT SHEET</h1>
+<div style="text-align: center; color: #666; font-size: 11px; margin: 8px 0;">Generated: {gen_time} | Doctor: DrMukul</div>
 
-{'='*70}
-Note: This report was auto-generated using AI analysis of OCR-extracted
-medical documents. Doctor review is required before final approval.
-{'='*70}
-        """.strip()
-
-        # Convert to HTML in HEALTH CLAIM ASSESSMENT SHEET format
-        doctor_name = structured_json.get('doctor_name', 'System Auto-Generated')
-        admission_date = structured_json.get('doa', '-')
-        discharge_date = structured_json.get('dod', '-')
-
-        html_report = f"""<div style="font-family: Arial, Helvetica, sans-serif; font-size: 14px; line-height: 1.45; padding: 20px;">
-<h1 style="text-align: center; font-size: 18px; font-weight: bold; margin: 20px 0;">HEALTH CLAIM ASSESSMENT SHEET</h1>
-<div style="text-align: center; color: #666; font-size: 12px; margin: 10px 0;">Generated: {datetime.now().strftime('%m/%d/%Y, %I:%M:%S %p')} | Doctor: {doctor_name}</div>
-
-<table style="width: 100%; border-collapse: collapse; margin: 20px 0;">
-<tbody style="background-color: #f5f0f0;">
-<tr style="background-color: #f5f0f0;"><td style="padding: 8px; border: 1px solid #999; font-weight: bold; width: 40%;">COMPANY NAME</td><td style="padding: 8px; border: 1px solid #999;">Medi Assist Insurance TPA Pvt. Ltd.</td></tr>
-<tr><td style="padding: 8px; border: 1px solid #999; font-weight: bold;">CLAIM NO.</td><td style="padding: 8px; border: 1px solid #999;">-</td></tr>
-<tr style="background-color: #f5f0f0;"><td style="padding: 8px; border: 1px solid #999; font-weight: bold;">CLAIM TYPE</td><td style="padding: 8px; border: 1px solid #999;">Cashless</td></tr>
-<tr><td style="padding: 8px; border: 1px solid #999; font-weight: bold;">INSURED</td><td style="padding: 8px; border: 1px solid #999;">-</td></tr>
-<tr style="background-color: #f5f0f0;"><td style="padding: 8px; border: 1px solid #999; font-weight: bold;">HOSPITAL</td><td style="padding: 8px; border: 1px solid #999;">{structured_data['hospital_name']}</td></tr>
-<tr><td style="padding: 8px; border: 1px solid #999; font-weight: bold;">TREATING DOCTOR</td><td style="padding: 8px; border: 1px solid #999;">{structured_data['treating_doctor']}</td></tr>
-<tr style="background-color: #f5f0f0;"><td style="padding: 8px; border: 1px solid #999; font-weight: bold;">TREATING DOCTOR REGISTRATION NUMBER</td><td style="padding: 8px; border: 1px solid #999;">-</td></tr>
-<tr><td style="padding: 8px; border: 1px solid #999; font-weight: bold;">ADMISSION</td><td style="padding: 8px; border: 1px solid #999;">{admission_date}</td></tr>
-<tr style="background-color: #f5f0f0;"><td style="padding: 8px; border: 1px solid #999; font-weight: bold;">DISCHARGE</td><td style="padding: 8px; border: 1px solid #999;">{discharge_date}</td></tr>
-<tr><td style="padding: 8px; border: 1px solid #999; font-weight: bold;">DIAGNOSIS</td><td style="padding: 8px; border: 1px solid #999;"><strong>{structured_data['diagnosis']}</strong></td></tr>
-<tr style="background-color: #f5f0f0;"><td style="padding: 8px; border: 1px solid #999; font-weight: bold;">CHIEF COMPLAINTS AT ADMISSION</td><td style="padding: 8px; border: 1px solid #999;">{structured_data['complaints']}</td></tr>
-<tr><td style="padding: 8px; border: 1px solid #999; font-weight: bold;">CLAIMED AMOUNT</td><td style="padding: 8px; border: 1px solid #999;">{structured_data['claim_amount']}</td></tr>
-</tbody>
-</table>
-
-<div style="background-color: #f5f5f5; padding: 10px; margin: 15px 0; font-weight: bold;">CLINICAL FINDINGS</div>
-<table style="width: 100%; border-collapse: collapse; margin: 10px 0;">
+<table style="width: 100%; border-collapse: collapse; margin: 15px 0;">
 <tbody>
-<tr><td style="padding: 8px; border: 1px solid #ddd;">{structured_data.get('findings', 'Clinical findings not available')}</td></tr>
+<tr style="background-color: #f5f0f0;"><td style="padding: 6px; border: 1px solid #999; font-weight: bold; width: 35%;">COMPANY NAME</td><td style="padding: 6px; border: 1px solid #999;">{company_name}</td></tr>
+<tr><td style="padding: 6px; border: 1px solid #999; font-weight: bold;">CLAIM NO.</td><td style="padding: 6px; border: 1px solid #999;">{claim_number}</td></tr>
+<tr style="background-color: #f5f0f0;"><td style="padding: 6px; border: 1px solid #999; font-weight: bold;">CLAIM TYPE</td><td style="padding: 6px; border: 1px solid #999;">{claim_type}</td></tr>
+<tr><td style="padding: 6px; border: 1px solid #999; font-weight: bold;">INSURED</td><td style="padding: 6px; border: 1px solid #999;">{insured_name}</td></tr>
+<tr style="background-color: #f5f0f0;"><td style="padding: 6px; border: 1px solid #999; font-weight: bold;">HOSPITAL</td><td style="padding: 6px; border: 1px solid #999;">{hospital_name}</td></tr>
+<tr><td style="padding: 6px; border: 1px solid #999; font-weight: bold;">TREATING DOCTOR</td><td style="padding: 6px; border: 1px solid #999;">{treating_doctor}</td></tr>
+<tr style="background-color: #f5f0f0;"><td style="padding: 6px; border: 1px solid #999; font-weight: bold;">TREATING DOCTOR REGISTRATION NUMBER</td><td style="padding: 6px; border: 1px solid #999;">{doctor_registration}</td></tr>
+<tr><td style="padding: 6px; border: 1px solid #999; font-weight: bold;">ADMISSION</td><td style="padding: 6px; border: 1px solid #999;">{doa}</td></tr>
+<tr style="background-color: #f5f0f0;"><td style="padding: 6px; border: 1px solid #999; font-weight: bold;">DISCHARGE</td><td style="padding: 6px; border: 1px solid #999;">{dod}</td></tr>
+<tr><td style="padding: 6px; border: 1px solid #999; font-weight: bold;">LENGTH OF STAY</td><td style="padding: 6px; border: 1px solid #999;">{length_of_stay}</td></tr>
+<tr style="background-color: #f5f0f0;"><td style="padding: 6px; border: 1px solid #999; font-weight: bold;">DIAGNOSIS</td><td style="padding: 6px; border: 1px solid #999;"><strong>{diagnosis}</strong></td></tr>
+<tr><td style="padding: 6px; border: 1px solid #999; font-weight: bold;">CHIEF COMPLAINTS AT ADMISSION</td><td style="padding: 6px; border: 1px solid #999;">{chief_complaints}</td></tr>
+<tr style="background-color: #f5f0f0;"><td style="padding: 6px; border: 1px solid #999; font-weight: bold;">MAJOR DIAGNOSTIC FINDING (ADMISSION / DURING STAY)</td><td style="padding: 6px; border: 1px solid #999;">{major_findings}</td></tr>
+<tr><td style="padding: 6px; border: 1px solid #999; font-weight: bold;">ALCOHOLISM HISTORY</td><td style="padding: 6px; border: 1px solid #999;">{alcoholism_history}</td></tr>
+<tr style="background-color: #f5f0f0;"><td style="padding: 6px; border: 1px solid #999; font-weight: bold;">CLAIMED AMOUNT</td><td style="padding: 6px; border: 1px solid #999;">{claimed_amount}</td></tr>
 </tbody>
 </table>
 
-<div style="background-color: #f5f5f5; padding: 10px; margin: 15px 0; font-weight: bold;">INVESTIGATION REPORTS</div>
-<table style="width: 100%; border-collapse: collapse; margin: 10px 0;">
+<div style="background-color: #f5f5f5; padding: 8px; margin: 12px 0; font-weight: bold; font-size: 12px;">CLINICAL FINDINGS</div>
+<table style="width: 100%; border-collapse: collapse; margin: 8px 0;">
 <tbody>
-<tr><td style="padding: 8px; border: 1px solid #ddd;">{structured_data.get('investigation_finding_in_details', 'Investigation reports not available')}</td></tr>
+<tr><td style="padding: 6px; border: 1px solid #ddd;">{clinical_findings}</td></tr>
 </tbody>
 </table>
 
-<div style="background-color: #f5f5f5; padding: 10px; margin: 15px 0; font-weight: bold;">MEDICINES USED</div>
-<table style="width: 100%; border-collapse: collapse; margin: 10px 0;">
+<div style="background-color: #f5f5f5; padding: 8px; margin: 12px 0; font-weight: bold; font-size: 12px;">ALL INVESTIGATION REPORTS</div>
+<table style="width: 100%; border-collapse: collapse; margin: 8px 0;">
 <tbody>
-<tr><td style="padding: 8px; border: 1px solid #ddd;">{structured_data['medicine_used']}</td></tr>
+<tr><td style="padding: 6px; border: 1px solid #ddd; white-space: pre-wrap;">{investigation_reports}</td></tr>
 </tbody>
 </table>
 
-<div style="background-color: #f5f5f5; padding: 10px; margin: 15px 0; font-weight: bold;">CONCLUSION AND RECOMMENDATION</div>
-<table style="width: 100%; border-collapse: collapse; margin: 10px 0;">
+<div style="background-color: #f5f5f5; padding: 8px; margin: 12px 0; font-weight: bold; font-size: 12px;">DERANGED INVESTIGATION REPORTS</div>
+<table style="width: 100%; border-collapse: collapse; margin: 8px 0;">
 <tbody>
-<tr style="background-color: #f5f0f0;"><td style="padding: 8px; border: 1px solid #999; font-weight: bold; width: 30%;">Final Recommendation</td><td style="padding: 8px; border: 1px solid #999;">{structured_json.get('recommendation', 'QUERY')}</td></tr>
-<tr><td style="padding: 8px; border: 1px solid #999; font-weight: bold; vertical-align: top;">Conclusion</td><td style="padding: 8px; border: 1px solid #999;">{structured_data['conclusion']}</td></tr>
-<tr style="background-color: #f5f0f0;"><td style="padding: 8px; border: 1px solid #999; font-weight: bold;">Recommendation</td><td style="padding: 8px; border: 1px solid #999;">{structured_json.get('recommendation', 'QUERY')}</td></tr>
+<tr><td style="padding: 6px; border: 1px solid #ddd;">{deranged_investigation}</td></tr>
 </tbody>
 </table>
 
-<hr style="margin-top: 20px;">
-<p style="font-size: 11px; color: #666;">Note: This report was auto-generated using AI analysis of OCR-extracted medical documents. Doctor review is required before final approval.</p>
+<div style="background-color: #f5f5f5; padding: 8px; margin: 12px 0; font-weight: bold; font-size: 12px;">DAILY TPR CHART (MIN/MAX)</div>
+<table style="width: 100%; border-collapse: collapse; margin: 8px 0;">
+<tbody>
+<tr><td style="padding: 6px; border: 1px solid #ddd;">{daily_tpr}</td></tr>
+</tbody>
+</table>
+
+<div style="background-color: #f5f5f5; padding: 8px; margin: 12px 0; font-weight: bold; font-size: 12px;">MEDICINE EVIDENCE USED</div>
+<table style="width: 100%; border-collapse: collapse; margin: 8px 0;">
+<tbody>
+<tr><td style="padding: 6px; border: 1px solid #ddd;">{medicine_used}</td></tr>
+</tbody>
+</table>
+
+<div style="background-color: #f5f5f5; padding: 8px; margin: 12px 0; font-weight: bold; font-size: 12px;">CONCLUSION AND RECOMMENDATION</div>
+<table style="width: 100%; border-collapse: collapse; margin: 8px 0;">
+<tbody>
+<tr style="background-color: #f5f0f0;"><td style="padding: 6px; border: 1px solid #999; font-weight: bold; width: 25%;">Admission Required</td><td style="padding: 6px; border: 1px solid #999;">{recommendation}</td></tr>
+<tr><td style="padding: 6px; border: 1px solid #999; font-weight: bold;">Final Recommendation</td><td style="padding: 6px; border: 1px solid #999;">{recommendation}</td></tr>
+<tr style="background-color: #f5f0f0;"><td style="padding: 6px; border: 1px solid #999; font-weight: bold; vertical-align: top;">Conclusion</td><td style="padding: 6px; border: 1px solid #999; white-space: pre-wrap;">{conclusion}</td></tr>
+<tr><td style="padding: 6px; border: 1px solid #999; font-weight: bold;">Recommendation</td><td style="padding: 6px; border: 1px solid #999; white-space: pre-wrap;">{query_reason if query_reason else recommendation}</td></tr>
+</tbody>
+</table>
+
+<hr style="margin-top: 15px;">
+<p style="font-size: 10px; color: #666; margin-top: 10px;">Note: This report was auto-generated using AI analysis of OCR-extracted medical documents. Doctor review is required before final approval.</p>
 </div>"""
+
+        # Keep simple text version as backup
+        text_report = f"""HEALTH CLAIM ASSESSMENT SHEET
+Generated: {gen_time}
+
+COMPANY: {company_name}
+CLAIM NO: {claim_number}
+CLAIM TYPE: {claim_type}
+INSURED: {insured_name}
+HOSPITAL: {hospital_name}
+TREATING DOCTOR: {treating_doctor}
+REGISTRATION: {doctor_registration}
+ADMISSION: {doa}
+DISCHARGE: {dod}
+LENGTH OF STAY: {length_of_stay}
+
+DIAGNOSIS: {diagnosis}
+COMPLAINTS: {chief_complaints}
+FINDINGS: {major_findings}
+CLINICAL FINDINGS: {clinical_findings}
+
+INVESTIGATION REPORTS:
+{investigation_reports}
+
+DERANGED INVESTIGATIONS: {deranged_investigation}
+
+DAILY TPR: {daily_tpr}
+
+MEDICINES: {medicine_used}
+
+CLAIMED AMOUNT: {claimed_amount}
+
+RECOMMENDATION: {recommendation}
+{query_reason if query_reason else ''}
+
+CONCLUSION:
+{conclusion}""".strip()
 
         # Insert report into database
         cur.execute('''
@@ -195,6 +298,13 @@ medical documents. Doctor review is required before final approval.
             )
             VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW(), NOW())
             ON CONFLICT (claim_id) DO UPDATE SET
+                hospital_name = EXCLUDED.hospital_name,
+                treating_doctor = EXCLUDED.treating_doctor,
+                diagnosis = EXCLUDED.diagnosis,
+                complaints = EXCLUDED.complaints,
+                medicine_used = EXCLUDED.medicine_used,
+                claim_amount = EXCLUDED.claim_amount,
+                conclusion = EXCLUDED.conclusion,
                 report_text = EXCLUDED.report_text,
                 status = 'generated',
                 updated_at = NOW()
@@ -212,6 +322,7 @@ medical documents. Doctor review is required before final approval.
         ))
 
         # Also save to report_versions so it shows as latest report in the system
+        cur.execute('SAVEPOINT report_version_savepoint')
         try:
             cur.execute('''
                 INSERT INTO report_versions (
@@ -226,7 +337,9 @@ medical documents. Doctor review is required before final approval.
                     NOW()
                 )
             ''', (claim_id, claim_id, html_report))
+            cur.execute('RELEASE SAVEPOINT report_version_savepoint')
         except Exception as e:
+            cur.execute('ROLLBACK TO SAVEPOINT report_version_savepoint')
             logger.warning(f'Could not save to report_versions: {str(e)}')
 
         logger.info(f'📄 Auto-report generated for claim {claim_id}')
@@ -256,11 +369,16 @@ def run_stage2_loop():
 
                 # Get OCR text from ALL documents in Stage 1 and combine
                 cur.execute('''
-                    SELECT de.raw_response, cd.file_name
-                    FROM document_extractions de
-                    JOIN claim_documents cd ON de.document_id = cd.id
-                    WHERE cd.claim_id = %s
-                    ORDER BY de.created_at ASC
+                    SELECT latest.raw_response, latest.file_name
+                    FROM (
+                        SELECT DISTINCT ON (de.document_id)
+                            de.document_id, de.raw_response, cd.file_name, de.created_at
+                        FROM document_extractions de
+                        JOIN claim_documents cd ON de.document_id = cd.id
+                        WHERE cd.claim_id = %s
+                        ORDER BY de.document_id, de.created_at DESC
+                    ) AS latest
+                    ORDER BY latest.file_name
                 ''', (claim_id,))
 
                 ocr_rows = cur.fetchall()
@@ -300,7 +418,12 @@ def run_stage2_loop():
                 external_id_row = cur.fetchone()
                 external_id = external_id_row[0] if external_id_row else ''
 
-                # Store structured data in database
+                # Text columns keep report-ready lines; raw_payload retains the full structured JSON.
+                claimed_amount = report_field_text(structured_json.get('claim_amount'))
+                complaints = report_field_text(structured_json.get('complaints'))
+                findings = report_field_text(structured_json.get('findings'))
+                investigations = report_field_text(structured_json.get('investigation_finding_in_details'))
+
                 cur.execute('''
                     INSERT INTO claim_structured_data (
                         claim_id, external_claim_id, company_name, hospital_name, treating_doctor,
@@ -332,31 +455,34 @@ def run_stage2_loop():
                         updated_at = NOW()
                 ''', (
                     claim_id, external_id,
-                    structured_json.get('company_name', ''),
-                    structured_json.get('hospital_name', ''),
-                    structured_json.get('treating_doctor', ''),
-                    structured_json.get('treating_doctor_registration_number', ''),
-                    structured_json.get('doa', ''),
-                    structured_json.get('dod', ''),
-                    structured_json.get('diagnosis', ''),
-                    structured_json.get('complaints', ''),
-                    structured_json.get('findings', ''),
-                    structured_json.get('medicine_used', ''),
-                    structured_json.get('high_end_antibiotic_for_rejection', ''),
-                    structured_json.get('deranged_investigation', ''),
-                    structured_json.get('investigation_finding_in_details', ''),
-                    structured_json.get('claim_amount', ''),
-                    structured_json.get('conclusion', ''),
-                    structured_json.get('recommendation', ''),
+                    report_field_text(structured_json.get('company_name')),
+                    report_field_text(structured_json.get('hospital_name')),
+                    report_field_text(structured_json.get('treating_doctor')),
+                    report_field_text(structured_json.get('treating_doctor_registration_number')),
+                    report_field_text(structured_json.get('doa')),
+                    report_field_text(structured_json.get('dod')),
+                    report_field_text(structured_json.get('diagnosis')),
+                    complaints,
+                    findings,
+                    report_field_text(structured_json.get('medicine_used')),
+                    report_field_text(structured_json.get('high_end_antibiotic_for_rejection')),
+                    report_field_text(structured_json.get('deranged_investigation')),
+                    investigations,
+                    claimed_amount,
+                    report_field_text(structured_json.get('conclusion')),
+                    report_field_text(structured_json.get('recommendation')),
                     json.dumps(structured_json),
                     GEMINI_MODEL
                 ))
 
                 conn.commit()
 
-                # AUTO-GENERATE REPORT - STAGE 3
-                auto_generate_report(cur, claim_id, structured_json)
-                conn.commit()
+                schedule_key = f'queue:stage3_scheduled:{claim_id}'
+                if r.set(schedule_key, '1', nx=True, ex=21600):
+                    r.lpush('queue:stage3_report_generation', json.dumps({'claim_id': claim_id}))
+                    logger.info('Queued Stage 3 report generation for claim %s', claim_id)
+                else:
+                    logger.info('Stage 3 already scheduled for claim %s', claim_id)
 
                 cur.close()
                 conn.close()

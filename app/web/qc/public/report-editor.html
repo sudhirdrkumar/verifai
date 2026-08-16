@@ -45,6 +45,25 @@
       min-width: 180px;
     }
 
+    .version-picker {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 12px;
+      font-weight: 600;
+      color: var(--muted);
+    }
+
+    .version-picker select {
+      width: min(360px, 42vw);
+      min-height: 34px;
+      border: 1px solid #b4c6de;
+      border-radius: 6px;
+      background: #fff;
+      color: var(--text);
+      padding: 5px 8px;
+    }
+
     .btn {
       border: 1px solid var(--brand);
       background: var(--brand);
@@ -374,6 +393,9 @@
 <body>
   <div class="topbar">
     <span class="title" id="report-title">Claim Report</span>
+    <label class="version-picker" for="report-version-select">Version
+      <select id="report-version-select" disabled><option value="">Loading versions...</option></select>
+    </label>
     <button id="grammar-check-btn" class="btn soft" type="button">Grammar Check</button>
     <button id="save-report-btn" class="btn" type="button">Save Report</button>
     <button id="save-complete-btn" class="btn" type="button">Save + Completed</button>
@@ -428,7 +450,7 @@
     </aside>
   </main>
 
-  <script src="/qc/public/report-editor.js?v=20260608a"></script>
+  <script src="/qc/public/report-editor.js?v=20260816a"></script>
 </body>
 </html>
 

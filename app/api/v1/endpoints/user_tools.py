@@ -282,15 +282,52 @@ def _system_report_sql(column_expr: str) -> str:
     col = f"LOWER(COALESCE({column_expr}, ''))"
     return (
         f"({col} LIKE 'system:%' OR {col} IN "
-        "('system', 'system_ml', 'system-ai', 'ml-system', 'checklist_pipeline'))"
+        "('system', 'system_ml', 'system-ai', 'system-auto-generated', 'ml-system', 'checklist_pipeline'))"
     )
 
 
 def _report_source_from_created_by(created_by: str | None) -> str:
     raw = str(created_by or '').strip().lower()
-    if raw.startswith('system:') or raw in {'system', 'system_ml', 'system-ai', 'ml-system', 'checklist_pipeline'}:
+    if raw.startswith('edited:'):
+        return 'edited'
+    if raw.startswith('auditor:'):
+        return 'auditor'
+    if raw.startswith('system:') or raw in {'system', 'system_ml', 'system-ai', 'system-auto-generated', 'ml-system', 'checklist_pipeline'}:
         return 'system'
     return 'doctor'
+
+
+def _report_source_sql(column_expr: str) -> str:
+    col = f"LOWER(COALESCE({column_expr}, ''))"
+    system_expr = _system_report_sql(column_expr)
+    return (
+        "CASE "
+        f"WHEN {col} LIKE 'edited:%' THEN 'edited' "
+        f"WHEN {col} LIKE 'auditor:%' THEN 'auditor' "
+        f"WHEN {system_expr} THEN 'system' "
+        "ELSE 'doctor' END"
+    )
+
+
+def _report_source_where_sql(column_expr: str, source: str) -> str:
+    normalized = str(source or 'any').strip().lower() or 'any'
+    if normalized == 'auto':
+        normalized = 'system'
+    col = f"LOWER(COALESCE({column_expr}, ''))"
+    system_expr = _system_report_sql(column_expr)
+    if normalized == 'system':
+        return f" AND {system_expr}"
+    if normalized == 'auditor':
+        return f" AND {col} LIKE 'auditor:%'"
+    if normalized == 'edited':
+        return f" AND {col} LIKE 'edited:%'"
+    if normalized == 'doctor':
+        return (
+            f" AND NOT ({system_expr})"
+            f" AND {col} NOT LIKE 'auditor:%'"
+            f" AND {col} NOT LIKE 'edited:%'"
+        )
+    return ''
 
 
 # DDL is now handled by run_pending_migrations() at startup (app/db/migrations.py).
@@ -1570,6 +1607,118 @@ def update_completed_report_auditor_rating(
     )
 
 
+@router.get("/completed-reports/{claim_id}/versions")
+def list_completed_report_versions(
+    claim_id: UUID,
+    db: Session = Depends(get_db),
+    current_user: AuthenticatedUser = Depends(require_roles(UserRole.super_admin, UserRole.user, UserRole.auditor, UserRole.doctor)),
+) -> dict:
+    claim_meta = db.execute(
+        text("SELECT external_claim_id, assigned_doctor_id FROM claims WHERE id = :claim_id"),
+        {"claim_id": str(claim_id)},
+    ).mappings().first()
+    if claim_meta is None:
+        raise HTTPException(status_code=404, detail="claim not found")
+    if current_user.role == UserRole.doctor and not doctor_matches_assignment(
+        str(claim_meta.get("assigned_doctor_id") or ""),
+        current_user.username,
+    ):
+        raise HTTPException(status_code=403, detail="doctor can access only assigned claims")
+
+    source_expr = _report_source_sql("rv.created_by")
+    rows = db.execute(
+        text(
+            f"""
+            SELECT
+                rv.version_no,
+                COALESCE(rv.report_status, 'draft') AS report_status,
+                COALESCE(rv.created_by, '') AS created_by,
+                {source_expr} AS report_source,
+                rv.created_at,
+                LENGTH(COALESCE(rv.report_markdown, '')) AS html_size
+            FROM report_versions rv
+            WHERE rv.claim_id = :claim_id
+              AND NULLIF(TRIM(COALESCE(rv.report_markdown, '')), '') IS NOT NULL
+            ORDER BY rv.version_no DESC
+            """
+        ),
+        {"claim_id": str(claim_id)},
+    ).mappings().all()
+
+    return {
+        "claim_id": str(claim_id),
+        "external_claim_id": str(claim_meta.get("external_claim_id") or ""),
+        "total": len(rows),
+        "items": [
+            {
+                "version_no": int(row.get("version_no") or 0),
+                "report_status": str(row.get("report_status") or "draft"),
+                "report_source": str(row.get("report_source") or "doctor"),
+                "created_by": str(row.get("created_by") or ""),
+                "created_at": str(row.get("created_at") or ""),
+                "html_size": int(row.get("html_size") or 0),
+            }
+            for row in rows
+        ],
+    }
+
+
+@router.get("/completed-reports/{claim_id}/versions/{version_no}", response_model=CompletedReportLatestHtmlResponse)
+def get_completed_report_version_html(
+    claim_id: UUID,
+    version_no: int,
+    db: Session = Depends(get_db),
+    current_user: AuthenticatedUser = Depends(require_roles(UserRole.super_admin, UserRole.user, UserRole.auditor, UserRole.doctor)),
+) -> CompletedReportLatestHtmlResponse:
+    if version_no < 1:
+        raise HTTPException(status_code=400, detail="version_no must be at least 1")
+    claim_meta = db.execute(
+        text("SELECT external_claim_id, assigned_doctor_id FROM claims WHERE id = :claim_id"),
+        {"claim_id": str(claim_id)},
+    ).mappings().first()
+    if claim_meta is None:
+        raise HTTPException(status_code=404, detail="claim not found")
+    if current_user.role == UserRole.doctor and not doctor_matches_assignment(
+        str(claim_meta.get("assigned_doctor_id") or ""),
+        current_user.username,
+    ):
+        raise HTTPException(status_code=403, detail="doctor can access only assigned claims")
+
+    source_expr = _report_source_sql("rv.created_by")
+    row = db.execute(
+        text(
+            f"""
+            SELECT
+                rv.version_no,
+                COALESCE(rv.report_markdown, '') AS report_html,
+                COALESCE(rv.report_status, 'draft') AS report_status,
+                COALESCE(rv.created_by, '') AS created_by,
+                {source_expr} AS report_source,
+                rv.created_at
+            FROM report_versions rv
+            WHERE rv.claim_id = :claim_id
+              AND rv.version_no = :version_no
+              AND NULLIF(TRIM(COALESCE(rv.report_markdown, '')), '') IS NOT NULL
+            LIMIT 1
+            """
+        ),
+        {"claim_id": str(claim_id), "version_no": version_no},
+    ).mappings().first()
+    if row is None:
+        raise HTTPException(status_code=404, detail="report version not found")
+
+    return CompletedReportLatestHtmlResponse(
+        claim_id=str(claim_id),
+        external_claim_id=str(claim_meta.get("external_claim_id") or ""),
+        version_no=int(row.get("version_no") or 0),
+        report_html=_normalize_report_title_html(row.get("report_html")),
+        report_status=str(row.get("report_status") or "draft"),
+        report_source=str(row.get("report_source") or "doctor"),
+        created_by=str(row.get("created_by") or ""),
+        created_at=str(row.get("created_at") or ""),
+    )
+
+
 @router.get("/completed-reports/{claim_id}/latest-html", response_model=CompletedReportLatestHtmlResponse)
 def get_completed_report_latest_html(
     claim_id: UUID,
@@ -1578,8 +1727,10 @@ def get_completed_report_latest_html(
     current_user: AuthenticatedUser = Depends(require_roles(UserRole.super_admin, UserRole.user, UserRole.auditor, UserRole.doctor)),
 ) -> CompletedReportLatestHtmlResponse:
     normalized_source = str(source or "any").strip().lower() or "any"
-    if normalized_source not in {"any", "doctor", "system"}:
-        raise HTTPException(status_code=400, detail="invalid source. allowed: any, doctor, system")
+    if normalized_source not in {"any", "auto", "doctor", "system", "auditor", "edited"}:
+        raise HTTPException(status_code=400, detail="invalid source. allowed: any, auto, system, doctor, auditor, edited")
+    if normalized_source == "auto":
+        normalized_source = "system"
 
     claim_meta = db.execute(
         text("SELECT assigned_doctor_id FROM claims WHERE id = :claim_id"),
@@ -1594,47 +1745,8 @@ def get_completed_report_latest_html(
     ):
         raise HTTPException(status_code=403, detail="doctor can access only assigned claims")
 
-    # Try to get auto-generated report from report_versions first
-    try:
-        auto_generated_row = db.execute(
-            text("""
-                SELECT rv.version_no, rv.report_markdown, rv.created_at
-                FROM report_versions rv
-                WHERE rv.claim_id = :claim_id
-                  AND rv.created_by = 'system-auto-generated'
-                ORDER BY rv.version_no DESC
-                LIMIT 1
-            """),
-            {"claim_id": str(claim_id)},
-        ).first()
-
-        logger.info(f"Auto-report query result: {bool(auto_generated_row)}, markdown_len: {len(auto_generated_row[1] or '') if auto_generated_row else 0}")
-
-        if auto_generated_row and auto_generated_row[1]:
-            report_markdown = auto_generated_row[1]
-            logger.info(f"Returning auto-generated report for claim {claim_id}")
-            return CompletedReportLatestHtmlResponse(
-                claim_id=str(claim_id),
-                external_claim_id="",
-                version_no=int(auto_generated_row[0] or 0),
-                report_html=report_markdown,
-                report_status="completed",
-                report_source="system",
-                created_by="system-auto-generated",
-                created_at=str(auto_generated_row[2] or ""),
-            )
-        else:
-            logger.warning(f"Auto-report query returned no result or empty markdown for claim {claim_id}")
-    except Exception as e:
-        logger.error(f"Error fetching auto-report for claim {claim_id}: {e}", exc_info=True)
-
-    # Fall back to old VerifAI reports
-    system_report_expr = _system_report_sql("rv.created_by")
-    source_where = ""
-    if normalized_source == "doctor":
-        source_where = f" AND NOT ({system_report_expr})"
-    elif normalized_source == "system":
-        source_where = f" AND {system_report_expr}"
+    report_source_expr = _report_source_sql("rv.created_by")
+    source_where = _report_source_where_sql("rv.created_by", normalized_source)
 
     row = db.execute(
         text(
@@ -1646,7 +1758,7 @@ def get_completed_report_latest_html(
                 COALESCE(rv.report_markdown, '') AS report_html,
                 COALESCE(rv.report_status, 'draft') AS report_status,
                 COALESCE(rv.created_by, '') AS created_by,
-                CASE WHEN {system_report_expr} THEN 'system' ELSE 'doctor' END AS report_source,
+                {report_source_expr} AS report_source,
                 rv.created_at
             FROM claims c
             JOIN report_versions rv ON rv.claim_id = c.id
@@ -1661,7 +1773,7 @@ def get_completed_report_latest_html(
     ).mappings().first()
 
     report_html = _normalize_report_title_html(row.get("report_html")) if row is not None else ""
-    if row is None or not report_html.strip():
+    if (row is None or not report_html.strip()) and normalized_source in {"any", "system", "doctor"}:
         # Fall back to decision_results (old system)
         decision_system_report_expr = _system_report_sql("dr.generated_by")
         decision_source_where = ""
@@ -2533,6 +2645,7 @@ def claim_document_status(
     search_claim: str | None = Query(default=None),
     allotment_date: str | None = Query(default=None),
     status_filter: str = Query(default="all"),
+    pipeline_status: str = Query(default="all"),
     doctor_filter: str | None = Query(default=None),
     document_upload: str = Query(default="all"),
     exclude_tagged: bool = Query(default=False),
@@ -2562,6 +2675,10 @@ def claim_document_status(
         if normalized_status not in valid_statuses:
             normalized_status = "all"
 
+        normalized_pipeline_status = (pipeline_status or "all").strip().lower()
+        if normalized_pipeline_status not in {"all", "failed", "success", "queued", "pending"}:
+            normalized_pipeline_status = "all"
+
         normalized_document_upload = (document_upload or "all").strip().lower()
         if normalized_document_upload not in {"all", "yes", "no"}:
             normalized_document_upload = "all"
@@ -2576,6 +2693,34 @@ def claim_document_status(
             "OR NULLIF(TRIM(COALESCE(um.opinion, '')), '') IS NOT NULL) "
             "OR COALESCE(um.report_export_status, 'pending') = 'uploaded' "
             "OR COALESCE(rv.export_uri, '') <> '')"
+        )
+        pipeline_success_expr = (
+            "(EXISTS (SELECT 1 FROM medical_reports mr WHERE mr.claim_id = c.id) "
+            "OR EXISTS (SELECT 1 FROM report_versions prv WHERE prv.claim_id = c.id))"
+        )
+        pipeline_active_expr = (
+            "EXISTS (SELECT 1 FROM extraction_jobs ej "
+            "WHERE ej.claim_id = c.id AND LOWER(COALESCE(ej.status, '')) IN ('queued', 'running', 'processing'))"
+        )
+        pipeline_structured_expr = "EXISTS (SELECT 1 FROM claim_structured_data csd WHERE csd.claim_id = c.id)"
+        pipeline_all_extracted_expr = (
+            "(COALESCE(ds.documents, 0) > 0 AND "
+            "(SELECT COUNT(DISTINCT ej.document_id) FROM extraction_jobs ej "
+            "WHERE ej.claim_id = c.id AND LOWER(COALESCE(ej.status, '')) = 'succeeded') >= COALESCE(ds.documents, 0))"
+        )
+        pipeline_failed_job_expr = (
+            "EXISTS (SELECT 1 FROM extraction_jobs ej "
+            "WHERE ej.claim_id = c.id AND LOWER(COALESCE(ej.status, '')) = 'failed')"
+        )
+        pipeline_queued_expr = (
+            f"(NOT ({pipeline_success_expr}) AND "
+            f"(({pipeline_active_expr}) OR ({pipeline_structured_expr}) OR ({pipeline_all_extracted_expr})))"
+        )
+        pipeline_failed_expr = (
+            f"(NOT ({pipeline_success_expr}) AND NOT ({pipeline_queued_expr}) AND ({pipeline_failed_job_expr}))"
+        )
+        pipeline_pending_expr = (
+            f"(NOT ({pipeline_success_expr}) AND NOT ({pipeline_queued_expr}) AND NOT ({pipeline_failed_expr}))"
         )
 
         if search_claim and search_claim.strip():
@@ -2615,6 +2760,14 @@ def claim_document_status(
         elif normalized_status != "all":
             filters.append("c.status = :status_filter")
             params["status_filter"] = normalized_status
+        if normalized_pipeline_status == "success":
+            filters.append(pipeline_success_expr)
+        elif normalized_pipeline_status == "queued":
+            filters.append(pipeline_queued_expr)
+        elif normalized_pipeline_status == "failed":
+            filters.append(pipeline_failed_expr)
+        elif normalized_pipeline_status == "pending":
+            filters.append(pipeline_pending_expr)
         if exclude_completed:
             filters.append("c.status <> 'completed'")
         if exclude_completed_uploaded:
@@ -2966,8 +3119,18 @@ def claim_document_status(
                 {"cid": claim_id_str}
             ).fetchall()
             extraction_succeeded = sum(count for status, count in extraction_counts if status == 'succeeded')
+            extraction_queued = sum(count for status, count in extraction_counts if status == 'queued')
+            extraction_running = sum(count for status, count in extraction_counts if status in {'running', 'processing'})
+            extraction_failed = sum(count for status, count in extraction_counts if status == 'failed')
             extraction_total = int(r.get("documents") or 0)
-            extraction_status = 'succeeded' if extraction_succeeded == extraction_total and extraction_total > 0 else ('partial' if extraction_succeeded > 0 else 'pending')
+            extraction_status = (
+                'succeeded' if extraction_succeeded == extraction_total and extraction_total > 0
+                else 'running' if extraction_running > 0
+                else 'queued' if extraction_queued > 0
+                else 'failed' if extraction_failed > 0 and extraction_succeeded == 0
+                else 'partial' if extraction_succeeded > 0
+                else 'pending'
+            )
 
             # Get structured and report counts
             structured_count = db.execute(
@@ -2975,8 +3138,15 @@ def claim_document_status(
                 {"cid": claim_id_str}
             ).fetchone()[0] or 0
             report_count = db.execute(
-                text("SELECT COUNT(*) FROM medical_reports WHERE claim_id = :cid"),
-                {"cid": claim_id_str}
+                text(
+                    """
+                    SELECT GREATEST(
+                        (SELECT COUNT(*) FROM medical_reports WHERE claim_id = :cid),
+                        (SELECT COUNT(*) FROM report_versions WHERE claim_id = :cid)
+                    )
+                    """
+                ),
+                {"cid": claim_id_str},
             ).fetchone()[0] or 0
 
             items.append(
@@ -3006,6 +3176,9 @@ def claim_document_status(
                     "verifai_json_state": verifai_json_state,
                     "extraction_status": extraction_status,
                     "extraction_succeeded": extraction_succeeded,
+                    "extraction_queued": extraction_queued,
+                    "extraction_running": extraction_running,
+                    "extraction_failed": extraction_failed,
                     "extraction_total": extraction_total,
                     "structured_count": structured_count,
                     "report_count": report_count,

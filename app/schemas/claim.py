@@ -60,7 +60,7 @@ class ClaimReportSaveRequest(BaseModel):
     report_html: str = Field(min_length=1)
     report_status: str = Field(default="draft", max_length=30)
     actor_id: str | None = Field(default=None, max_length=100)
-    report_source: str = Field(default="doctor", pattern="^(doctor|system)$")
+    report_source: str = Field(default="doctor", pattern="^(auto|system|doctor|auditor|edited)$")
 
 
 class ClaimReportSaveResponse(BaseModel):

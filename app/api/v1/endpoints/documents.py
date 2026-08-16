@@ -44,8 +44,6 @@ from app.services.documents_service import (
 )
 from app.services.extraction_queue_service import ExtractionQueueService
 from app.schemas.extraction import ExtractionProvider
-import redis
-import json as json_lib
 from app.services.storage_service import StorageConfigError, StorageOperationError, generate_upload_url, upload_bytes
 from app.core.config import settings
 
@@ -149,30 +147,16 @@ async def upload_document_endpoint(
         )
         logger.info(f"✅ Document {document.id} created for claim {claim_id}")
 
-        # AUTO-QUEUE for extraction (OpenAI Vision primary)
+        # Queue one canonical Stage 1 task; the worker uses Textract.
         try:
             queue_service = ExtractionQueueService()
-            job = queue_service.enqueue(
+            queue_service.enqueue(
                 document_id=document.id,
-                provider=ExtractionProvider.openai,
+                provider=ExtractionProvider.auto,
                 actor_id=uploaded_by or current_user.username,
                 force_refresh=False,
             )
-            logger.info(f"✅ Queued document {document.id} for Stage 1 OCR (OpenAI Vision)")
-
-            # ALSO push to Redis queue for workers to pick up immediately
-            try:
-                r = redis.Redis(host='127.0.0.1', port=6379, decode_responses=True)
-                task = json_lib.dumps({
-                    'job_id': str(job.job_id),
-                    'document_id': str(document.id),
-                    'claim_id': str(claim_id),
-                    'provider': 'openai'
-                })
-                r.lpush('queue:stage1_ocr_extraction', task)
-                logger.info(f"✅ Pushed to Redis queue for immediate processing")
-            except Exception as redis_err:
-                logger.warning(f"Failed to push to Redis queue: {redis_err}")
+            logger.info(f"Queued document {document.id} for Stage 1 Textract OCR")
 
         except Exception as queue_err:
             logger.warning(f"Failed to queue document {document.id}: {queue_err}")
