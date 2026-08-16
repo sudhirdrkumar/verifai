@@ -565,22 +565,8 @@
       const fd = new FormData();
       fd.append('file', file);
       fd.append('uploaded_by', String(uploadedBy || 'ui-user'));
-      fd.append('compression_mode', 'lossy');
       const claimId = String(claimKey || '').trim();
-      try {
-        return await uploadFormDataWithProgress('/api/v1/claims/' + encodeURIComponent(claimId) + '/documents', fd, onProgress);
-      } catch (err) {
-        const fallbackFd = new FormData();
-        fallbackFd.append('files', file);
-        fallbackFd.append('uploaded_by', String(uploadedBy || 'ui-user'));
-        fallbackFd.append('compression_mode', 'lossy');
-        try {
-          const fallbackResult = await uploadFormDataWithProgress('/api/v1/claims/' + encodeURIComponent(claimId) + '/documents/merged', fallbackFd, onProgress);
-          return fallbackResult && fallbackResult.document ? fallbackResult.document : fallbackResult;
-        } catch (_fallbackErr) {
-          throw err;
-        }
-      }
+      return await uploadFormDataWithProgress('/api/v1/claims/' + encodeURIComponent(claimId) + '/documents', fd, onProgress);
     }
 
     async function runWithConcurrency(items, limit, worker) {
