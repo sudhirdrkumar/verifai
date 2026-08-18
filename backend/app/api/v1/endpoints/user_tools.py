@@ -44,6 +44,27 @@ from app.utils.db_utils import get_db_context
 router = APIRouter(prefix="/user-tools", tags=["user-tools"])
 
 logger = logging.getLogger(__name__)
+
+# Dashboard caching to avoid expensive queries
+_DASHBOARD_CACHE = {}
+_DASHBOARD_CACHE_TTL_SECONDS = 300  # 5 minutes
+
+def _get_cached_dashboard():
+    """Get dashboard from cache if fresh."""
+    now = datetime.now(timezone.utc)
+    if 'data' in _DASHBOARD_CACHE and 'timestamp' in _DASHBOARD_CACHE:
+        age = (now - _DASHBOARD_CACHE['timestamp']).total_seconds()
+        if age < _DASHBOARD_CACHE_TTL_SECONDS:
+            logger.info(f"📊 Serving dashboard from cache (age: {age:.0f}s)")
+            return _DASHBOARD_CACHE['data']
+    return None
+
+def _set_cached_dashboard(data):
+    """Cache dashboard result."""
+    _DASHBOARD_CACHE['data'] = data
+    _DASHBOARD_CACHE['timestamp'] = datetime.now(timezone.utc)
+    logger.info("💾 Dashboard cached")
+
 _EMPTY_LIKE_TEXT_VALUES = {
     "na",
     "n/a",
@@ -2007,6 +2028,11 @@ def allotment_date_wise_claims(
 def dashboard_overview(
     _current_user: AuthenticatedUser = Depends(require_roles(UserRole.super_admin, UserRole.user)),
 ) -> dict:
+    # Check cache first to avoid expensive query
+    cached = _get_cached_dashboard()
+    if cached is not None:
+        return cached
+
     with get_db_context() as db:
         _ensure_claim_report_uploads_table(db)
         _ensure_claim_legacy_data_table(db)
@@ -2172,7 +2198,7 @@ def dashboard_overview(
             )
         ).mappings().all()
 
-        return {
+        result = {
             "day_wise_completed": [
                 {
                     "date": str(r.get("completed_date") or ""),
@@ -2195,6 +2221,8 @@ def dashboard_overview(
             "fraud_tagged_savings_cases": int(fraud_row.get("fraud_tagged_savings_cases") or 0),
             "fraud_tagged_savings_amount": float(fraud_row.get("fraud_tagged_savings_amount") or 0),
         }
+        _set_cached_dashboard(result)
+        return result
 @router.get("/doctor-completion-stats")
 def doctor_completion_stats(
     month: str | None = Query(default=None),
