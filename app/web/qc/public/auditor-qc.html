@@ -6,15 +6,78 @@
   <title>Auditor QC Review</title>
   <link rel="stylesheet" href="/qc/public/app.css?v=20260348">
   <style>
-    body { margin: 0; font-family: "Outfit", "Segoe UI", Arial, sans-serif; background: #eef3f8; color: #1f2f46; overflow: hidden; }
-    .topbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 12px 16px; background: #ffffff; border-bottom: 1px solid #d8e2ef; position: sticky; top: 0; z-index: 10; }
-    .topbar h2 { margin: 0; font-size: 20px; }
-    .topbar .meta { color: #4d6485; font-size: 13px; }
-    .actions { display: flex; gap: 8px; flex-wrap: wrap; }
-    .actions button { border: 1px solid #2b64a7; background: #2b64a7; color: #fff; border-radius: 8px; padding: 8px 12px; font-weight: 600; cursor: pointer; }
-    .actions button.soft { background: #fff; color: #2b64a7; }
-    .actions button:disabled { opacity: 0.6; cursor: not-allowed; }
-    #qc-msg { margin: 0; padding: 8px 16px; min-height: 20px; }
+    body {
+      margin: 0;
+      font-family: "Outfit", "Segoe UI", Arial, sans-serif;
+      background: #eef3f8;
+      color: #1f2f46;
+      overflow: hidden;
+      -webkit-text-size-adjust: 100%;
+    }
+    .topbar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 12px 16px;
+      background: #ffffff;
+      border-bottom: 1px solid #d8e2ef;
+      position: sticky;
+      top: 0;
+      z-index: 10;
+      flex-wrap: wrap;
+    }
+    .topbar h2 {
+      margin: 0;
+      font-size: clamp(1rem, 2.5vw, 1.5rem);
+      word-break: break-word;
+    }
+    .topbar .meta {
+      color: #4d6485;
+      font-size: clamp(0.75rem, 2vw, 0.8rem);
+      word-break: break-word;
+    }
+    .actions {
+      display: flex;
+      gap: 6px;
+      flex-wrap: wrap;
+      width: 100%;
+    }
+    .actions button {
+      border: 1px solid #2b64a7;
+      background: #2b64a7;
+      color: #fff;
+      border-radius: 8px;
+      padding: 8px 12px;
+      font-weight: 600;
+      cursor: pointer;
+      font-size: clamp(0.75rem, 2vw, 0.9rem);
+      min-height: 36px;
+      flex: 0 1 auto;
+      white-space: nowrap;
+    }
+    .actions button.soft {
+      background: #fff;
+      color: #2b64a7;
+    }
+    .actions button:disabled {
+      opacity: 0.6;
+      cursor: not-allowed;
+    }
+
+    @media (hover: none) and (pointer: coarse) {
+      .actions button {
+        min-height: 44px;
+        padding: 10px 14px;
+      }
+    }
+    #qc-msg {
+      margin: 0;
+      padding: 8px 16px;
+      min-height: 20px;
+      font-size: clamp(0.8rem, 2vw, 0.95rem);
+      word-break: break-word;
+    }
     .layout {
       --left-pane-width: 52%;
       display: grid;
@@ -24,6 +87,38 @@
       height: calc(100vh - 120px);
       box-sizing: border-box;
       align-items: stretch;
+    }
+
+    @media (max-width: 1200px) {
+      .layout {
+        --left-pane-width: 50%;
+      }
+    }
+
+    @media (max-width: 1100px) {
+      .layout {
+        grid-template-columns: 1fr;
+        height: auto;
+        gap: 8px;
+        padding: 8px;
+      }
+    }
+
+    @media (max-width: 768px) {
+      .layout {
+        height: auto;
+        gap: 6px;
+        padding: 6px;
+      }
+    }
+
+    @media (max-width: 480px) {
+      .layout {
+        display: flex;
+        flex-direction: column;
+        height: calc(100vh - 200px);
+        padding: 4px;
+      }
     }
     .splitter {
       width: 10px;
@@ -58,21 +153,141 @@
       cursor: col-resize !important;
       user-select: none !important;
     }
-    .panel { background: #fff; border: 1px solid #d8e2ef; border-radius: 12px; display: flex; flex-direction: column; min-height: 0; }
-    .panel-head { padding: 10px 12px; border-bottom: 1px solid #e5ecf5; font-weight: 700; display: flex; justify-content: space-between; align-items: center; }
-    .panel-body { padding: 10px; min-height: 0; overflow: hidden; }
-    .panel-body.report-pane { display: grid; grid-template-rows: auto 1fr; gap: 10px; }
-    .conclusion-box { border: 1px solid #d8e2ef; border-radius: 10px; background: #f8fbff; padding: 10px; display: grid; gap: 8px; }
-    .conclusion-box-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
-    .conclusion-box-head span { font-size: 13px; font-weight: 700; color: #2a456b; }
-    .conclusion-box-head button { border: 1px solid #2b64a7; background: #fff; color: #1f2f46; border-radius: 8px; padding: 6px 10px; font-weight: 600; cursor: pointer; }
-    #qc-conclusion-only { width: 100%; min-height: 104px; resize: vertical; border: 1px solid #c7d6e8; border-radius: 8px; padding: 8px 10px; font-family: "Outfit", "Segoe UI", Arial, sans-serif; font-size: 14px; color: #1f2f46; background: #fff; }
-    #qc-conclusion-only:focus { outline: 2px solid #9ec3f3; outline-offset: 0; }
-    #report-editor { height: 100%; overflow: auto; border: 1px solid #d6dfeb; border-radius: 10px; padding: 12px; background: #fff; }
-    #report-editor:focus { outline: 2px solid #9ec3f3; outline-offset: 0; }
+    .panel {
+      background: #fff;
+      border: 1px solid #d8e2ef;
+      border-radius: 12px;
+      display: flex;
+      flex-direction: column;
+      min-height: 0;
+      word-break: break-word;
+      overflow-wrap: break-word;
+    }
+    .panel-head {
+      padding: clamp(8px, 2vw, 12px);
+      border-bottom: 1px solid #e5ecf5;
+      font-weight: 700;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: 8px;
+      font-size: clamp(0.85rem, 2vw, 1rem);
+    }
+    .panel-body {
+      padding: clamp(8px, 2vw, 12px);
+      min-height: 0;
+      overflow: hidden;
+      word-break: break-word;
+    }
+    .panel-body.report-pane {
+      display: grid;
+      grid-template-rows: auto 1fr;
+      gap: 8px;
+    }
+    .conclusion-box {
+      border: 1px solid #d8e2ef;
+      border-radius: 10px;
+      background: #f8fbff;
+      padding: clamp(8px, 2vw, 10px);
+      display: grid;
+      gap: 6px;
+      word-break: break-word;
+    }
+    .conclusion-box-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 6px;
+      flex-wrap: wrap;
+    }
+    .conclusion-box-head span {
+      font-size: clamp(0.8rem, 2vw, 0.8rem);
+      font-weight: 700;
+      color: #2a456b;
+    }
+    .conclusion-box-head button {
+      border: 1px solid #2b64a7;
+      background: #fff;
+      color: #1f2f46;
+      border-radius: 8px;
+      padding: 6px 10px;
+      font-weight: 600;
+      cursor: pointer;
+      font-size: clamp(0.75rem, 2vw, 0.8rem);
+      min-height: 32px;
+      white-space: nowrap;
+    }
+    #qc-conclusion-only {
+      width: 100%;
+      min-height: 104px;
+      resize: vertical;
+      border: 1px solid #c7d6e8;
+      border-radius: 8px;
+      padding: 8px 10px;
+      font-family: "Outfit", "Segoe UI", Arial, sans-serif;
+      font-size: 14px;
+      color: #1f2f46;
+      background: #fff;
+      box-sizing: border-box;
+      word-break: break-word;
+      overflow-wrap: break-word;
+    }
+    #qc-conclusion-only:focus {
+      outline: 2px solid #9ec3f3;
+      outline-offset: 0;
+    }
+    #report-editor {
+      height: 100%;
+      overflow: auto;
+      -webkit-overflow-scrolling: touch;
+      border: 1px solid #d6dfeb;
+      border-radius: 10px;
+      padding: 12px;
+      background: #fff;
+      word-break: break-word;
+      overflow-wrap: break-word;
+      box-sizing: border-box;
+    }
+    #report-editor:focus {
+      outline: 2px solid #9ec3f3;
+      outline-offset: 0;
+    }
 
-    .docs-wrap { display: grid; grid-template-rows: auto auto 1fr; gap: 8px; height: 100%; }
-    .doc-select-row { display: grid; grid-template-columns: minmax(0, 1fr) auto auto auto; gap: 8px; align-items: center; }
+    @media (max-width: 768px) {
+      #qc-conclusion-only {
+        min-height: 80px;
+      }
+      #report-editor {
+        min-height: 200px;
+      }
+    }
+
+    @media (max-width: 480px) {
+      #qc-conclusion-only {
+        min-height: 60px;
+        font-size: 13px;
+      }
+      #report-editor {
+        min-height: 150px;
+        font-size: 13px;
+      }
+    }
+
+    .docs-wrap {
+      display: grid;
+      grid-template-rows: auto auto 1fr;
+      gap: 6px;
+      height: 100%;
+      word-break: break-word;
+    }
+    .doc-select-row {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto auto auto;
+      gap: 6px;
+      align-items: center;
+      flex-wrap: wrap;
+    }
     #doc-select {
       width: 100%;
       min-width: 0;
@@ -81,7 +296,9 @@
       border-radius: 8px;
       background: #fff;
       color: #1f2f46;
-      font-size: 14px;
+      font-size: clamp(0.85rem, 2vw, 0.9rem);
+      min-height: 36px;
+      box-sizing: border-box;
     }
     .doc-select-row button {
       border: 1px solid #b4c6de;
@@ -90,17 +307,54 @@
       border-radius: 8px;
       padding: 7px 10px;
       cursor: pointer;
-      font-size: 13px;
+      font-size: clamp(0.75rem, 2vw, 0.8rem);
       font-weight: 600;
-      min-width: 72px;
+      min-width: auto;
+      flex: 0 1 auto;
       white-space: nowrap;
+      min-height: 36px;
+      box-sizing: border-box;
     }
     #doc-selected-name {
       color: #587296;
-      font-size: 12px;
+      font-size: clamp(0.75rem, 2vw, 0.8rem);
       overflow: hidden;
       text-overflow: ellipsis;
-      white-space: nowrap;
+      word-break: break-word;
+      padding: 2px 0;
+    }
+
+    @media (max-width: 1100px) {
+      .doc-select-row {
+        grid-template-columns: 1fr 1fr 1fr 1fr;
+      }
+      .doc-select-row button {
+        min-width: 0;
+      }
+    }
+
+    @media (max-width: 768px) {
+      .doc-select-row {
+        grid-template-columns: 1fr;
+        gap: 4px;
+      }
+      .doc-select-row button {
+        width: 100%;
+        min-height: 40px;
+      }
+    }
+
+    @media (max-width: 480px) {
+      .docs-wrap {
+        gap: 4px;
+      }
+      .doc-select-row {
+        gap: 4px;
+      }
+      #doc-select {
+        min-height: 40px;
+        font-size: 14px;
+      }
     }
     #doc-preview-container { width: 100%; height: 100%; border: 1px solid #d6dfeb; border-radius: 10px; background: #fff; overflow: hidden; }
     #doc-preview { width: 100%; height: 100%; border: 0; background: #fff; }
@@ -117,33 +371,72 @@
       z-index: 50;
       padding: 16px;
       box-sizing: border-box;
+      overflow-y: auto;
+      -webkit-overflow-scrolling: touch;
     }
-    .qc-confirm-overlay.open { display: flex; }
+    .qc-confirm-overlay.open {
+      display: flex;
+    }
     .qc-confirm-card {
       width: min(540px, 100%);
+      max-height: 90vh;
+      overflow-y: auto;
+      -webkit-overflow-scrolling: touch;
       background: #fff;
       border: 1px solid #d8e2ef;
       border-radius: 12px;
       box-shadow: 0 16px 40px rgba(16, 33, 55, 0.25);
-      padding: 16px;
+      padding: clamp(12px, 3vw, 16px);
       display: grid;
       gap: 10px;
+      word-break: break-word;
     }
-    .qc-confirm-card h3 { margin: 0; font-size: 18px; color: #1f2f46; }
-    .qc-confirm-card p { margin: 0; color: #365072; line-height: 1.45; }
-    .qc-confirm-field { display: grid; gap: 6px; margin-top: 2px; }
-    .qc-confirm-field label { font-size: 13px; color: #365072; font-weight: 600; }
+    .qc-confirm-card h3 {
+      margin: 0;
+      font-size: clamp(1rem, 4vw, 1.2rem);
+      color: #1f2f46;
+    }
+    .qc-confirm-card p {
+      margin: 0;
+      color: #365072;
+      line-height: 1.45;
+      word-break: break-word;
+      font-size: clamp(0.85rem, 2vw, 0.95rem);
+    }
+    .qc-confirm-field {
+      display: grid;
+      gap: 6px;
+      margin-top: 2px;
+    }
+    .qc-confirm-field label {
+      font-size: clamp(0.8rem, 2vw, 0.85rem);
+      color: #365072;
+      font-weight: 600;
+    }
     .qc-confirm-field select {
       border: 1px solid #b4c6de;
       border-radius: 8px;
-      padding: 8px 10px;
-      font-size: 14px;
+      padding: 10px 10px;
+      font-size: clamp(0.9rem, 2vw, 0.95rem);
       color: #1f2f46;
       background: #fff;
-      min-width: 180px;
+      width: 100%;
+      min-height: 40px;
+      box-sizing: border-box;
     }
-    .qc-confirm-msg { min-height: 18px; font-size: 12px; color: #587296; }
-    .qc-confirm-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 6px; }
+    .qc-confirm-msg {
+      min-height: 18px;
+      font-size: clamp(0.75rem, 2vw, 0.85rem);
+      color: #587296;
+      word-break: break-word;
+    }
+    .qc-confirm-actions {
+      display: flex;
+      justify-content: flex-end;
+      gap: 8px;
+      margin-top: 6px;
+      flex-wrap: wrap;
+    }
     .qc-confirm-actions button {
       border: 1px solid #2b64a7;
       background: #2b64a7;
@@ -152,6 +445,9 @@
       padding: 8px 12px;
       font-weight: 600;
       cursor: pointer;
+      font-size: clamp(0.8rem, 2vw, 0.9rem);
+      min-height: 36px;
+      flex: 0 1 auto;
     }
     .qc-confirm-actions button.soft {
       background: #fff;
@@ -163,11 +459,66 @@
     }
 
     @media (max-width: 1100px) {
-      .layout { grid-template-columns: 1fr; height: auto; }
-      .splitter { display: none; }
-      .panel { min-height: 420px; }
-      .doc-select-row { grid-template-columns: 1fr 1fr 1fr 1fr; }
-      .doc-select-row button { min-width: 0; }
+      .layout {
+        grid-template-columns: 1fr;
+        height: auto;
+      }
+      .splitter {
+        display: none;
+      }
+      .panel {
+        min-height: 420px;
+      }
+    }
+
+    @media (max-width: 768px) {
+      .topbar {
+        padding: 8px 12px;
+      }
+      .actions {
+        gap: 4px;
+      }
+      .actions button {
+        padding: 6px 8px;
+        min-height: 32px;
+      }
+    }
+
+    @media (max-width: 480px) {
+      .topbar {
+        padding: 6px 10px;
+        flex-direction: column;
+        align-items: flex-start;
+      }
+      .topbar h2 {
+        font-size: 1rem;
+        margin-bottom: 4px;
+        width: 100%;
+      }
+      .actions {
+        width: 100%;
+        gap: 4px;
+      }
+      .actions button {
+        flex: 1 1 calc(50% - 2px);
+        padding: 6px 4px;
+        font-size: 0.7rem;
+        min-height: 36px;
+      }
+      .panel {
+        min-height: auto;
+      }
+      .qc-confirm-card {
+        padding: 12px;
+      }
+      .qc-confirm-actions {
+        flex-direction: column;
+        gap: 6px;
+      }
+      .qc-confirm-actions button {
+        width: 100%;
+        min-height: 40px;
+      }
     }
   </style>
   <script>window.learningToolsRuntime = window.learningToolsRuntime || {};</script>
