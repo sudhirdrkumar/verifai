@@ -193,11 +193,13 @@
 
       .login-brand {
         gap: 12px;
+        margin-bottom: 14px;
       }
 
       .brand-avatar {
         width: 56px;
         height: 56px;
+        flex-shrink: 0;
       }
 
       .brand-avatar::before,
@@ -215,8 +217,124 @@
         right: 14px;
       }
 
+      .login-field input {
+        padding: 14px 14px;
+        font-size: 16px;
+        min-height: 48px;
+      }
+
+      .login-submit {
+        padding: 14px 14px;
+        min-height: 48px;
+        font-size: 1rem;
+        margin-top: 10px;
+      }
+
       .login-meta {
         justify-content: flex-start;
+        flex-direction: column;
+        align-items: flex-start;
+        gap: 8px;
+        font-size: 0.88rem;
+        margin-top: 12px;
+      }
+
+      .login-error {
+        padding: 10px 12px;
+        font-size: 0.9rem;
+        margin: 8px 0 12px;
+      }
+    }
+
+    @media (max-width: 480px) {
+      body.login-page {
+        padding: 12px;
+      }
+
+      .login-card {
+        border-radius: 20px;
+        padding: 18px 16px;
+        width: 100%;
+      }
+
+      .login-brand h2 {
+        font-size: 1.3rem;
+      }
+
+      .login-brand p {
+        font-size: 0.85rem;
+      }
+
+      .login-field {
+        margin-bottom: 12px;
+      }
+
+      .login-field label {
+        font-size: 0.85rem;
+        margin-bottom: 6px;
+      }
+
+      .login-field input {
+        padding: 12px 12px;
+        font-size: 16px;
+        min-height: 44px;
+        border-radius: 12px;
+      }
+
+      .login-submit {
+        padding: 12px 12px;
+        min-height: 44px;
+        font-size: 0.95rem;
+        border-radius: 12px;
+        margin-top: 8px;
+      }
+
+      .login-meta {
+        margin-top: 10px;
+        gap: 6px;
+      }
+
+      .login-error {
+        padding: 8px 10px;
+        font-size: 0.85rem;
+        margin: 6px 0 10px;
+        border-radius: 8px;
+      }
+    }
+
+    @media (max-width: 360px) {
+      .login-card {
+        padding: 16px 12px;
+      }
+
+      .login-brand {
+        gap: 10px;
+        margin-bottom: 12px;
+      }
+
+      .brand-avatar {
+        width: 48px;
+        height: 48px;
+      }
+
+      .login-brand h2 {
+        font-size: 1.1rem;
+        margin: 0;
+      }
+
+      .login-brand p {
+        font-size: 0.75rem;
+        margin: 4px 0 0;
+      }
+
+      .login-field input,
+      .login-submit {
+        font-size: 16px;
+        padding: 10px 10px;
+      }
+
+      input {
+        -webkit-text-size-adjust: 100%;
       }
     }
   </style>

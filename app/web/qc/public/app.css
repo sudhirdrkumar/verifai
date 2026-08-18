@@ -23,10 +23,24 @@
 
 * {
   box-sizing: border-box;
+  -webkit-tap-highlight-color: transparent;
 }
 
 html, body {
   margin: 0;
+  -webkit-text-size-adjust: 100%;
+}
+
+/* Touch-friendly button/input targets */
+@media (hover: none) and (pointer: coarse) {
+  button, .btn, input, select, textarea, a {
+    min-height: 48px;
+    min-width: 48px;
+  }
+
+  button, .btn {
+    padding: 12px 16px;
+  }
 }
 
 body.app-body {
@@ -52,6 +66,43 @@ a {
 
 .shell {
   width: min(980px, 95vw);
+}
+
+/* Mobile menu toggle */
+.mobile-menu-toggle {
+  display: none;
+  background: none;
+  border: none;
+  color: inherit;
+  cursor: pointer;
+  padding: 8px;
+  min-width: 44px;
+  min-height: 44px;
+  font-size: 1.5rem;
+  z-index: 101;
+}
+
+.mobile-menu-overlay {
+  display: none;
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: rgba(0, 0, 0, 0.5);
+  z-index: 998;
+}
+
+.mobile-menu-overlay.open {
+  display: block;
+}
+
+@media (max-width: 640px) {
+  .mobile-menu-toggle {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
 }
 
 .panel {
@@ -91,14 +142,17 @@ h3 {
 
 .form-row {
   margin-bottom: 12px;
+  display: flex;
+  flex-direction: column;
 }
 
 label {
-  display: inline-block;
+  display: block;
   font-size: 0.92rem;
   margin-bottom: 6px;
   color: #3f5872;
   font-weight: 600;
+  word-break: break-word;
 }
 
 input,
@@ -206,6 +260,7 @@ button[disabled],
 
 .table-wrap {
   overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
   border: 1px solid #d7e3f2;
   border-radius: 12px;
   background: #fff;
@@ -215,6 +270,8 @@ button[disabled],
 table {
   width: 100%;
   border-collapse: collapse;
+  word-break: break-word;
+  overflow-wrap: break-word;
 }
 
 th,
@@ -291,6 +348,15 @@ tbody tr:hover {
 .fullscreen-layout {
   min-height: 100vh;
   padding: 18px;
+  word-break: break-word;
+  overflow-wrap: break-word;
+  hyphens: auto;
+}
+
+/* Improved text handling */
+p, span, div, li, td, th {
+  word-break: break-word;
+  overflow-wrap: break-word;
 }
 
 .top-header {
@@ -720,20 +786,28 @@ tbody tr:hover {
   background: rgba(15, 23, 42, 0.5);
   padding: 20px;
   z-index: 1000;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
 }
 
 .modal-backdrop.open {
-  display: grid;
-  place-items: center;
+  display: flex;
+  align-items: center;
+  justify-content: center;
 }
 
 .modal-card {
   width: min(520px, 94vw);
+  max-height: 90vh;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
   background: linear-gradient(180deg, #fff, #fbfdff);
   border: 1px solid #d8e3f0;
   border-radius: 14px;
   box-shadow: 0 28px 60px rgba(2, 12, 27, 0.35);
   padding: 18px;
+  word-wrap: break-word;
+  overflow-wrap: break-word;
 }
 
 .modal-card.wide {
@@ -752,6 +826,20 @@ tbody tr:hover {
   overflow: auto;
 }
 
+@media (max-width: 1024px) {
+  .workspace-grid {
+    grid-template-columns: 200px minmax(0, 1fr);
+  }
+
+  .side-nav {
+    padding: 10px;
+  }
+
+  .stats-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
 @media (max-width: 980px) {
   .claim-status-filters {
     grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -767,6 +855,85 @@ tbody tr:hover {
   .top-header {
     flex-direction: column;
     align-items: flex-start;
+  }
+
+  .case-detail-header {
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  .case-detail-header__actions {
+    width: 100%;
+    justify-content: flex-start;
+  }
+
+  .case-parse-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 640px) {
+  .workspace-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .side-nav {
+    display: none;
+    position: fixed;
+    top: 0;
+    left: 0;
+    height: 100vh;
+    width: 280px;
+    max-width: 80vw;
+    z-index: 999;
+    overflow-y: auto;
+    border-radius: 0;
+    border-right: 1px solid #d6e2f1;
+  }
+
+  .side-nav.mobile-open {
+    display: flex;
+    flex-direction: column;
+    padding: 16px 12px;
+  }
+
+  .top-header {
+    flex-direction: row;
+    justify-content: space-between;
+    align-items: center;
+  }
+
+  .top-header__left {
+    min-width: 0;
+    flex: 1 1 auto;
+  }
+
+  .top-header__actions {
+    flex: 0 1 auto;
+    width: auto;
+    justify-content: flex-end;
+  }
+
+  .claim-status-filters {
+    grid-template-columns: 1fr;
+  }
+
+  .claim-status-toolbar {
+    flex-direction: column;
+  }
+
+  .claim-status-toolbar .claim-filter-group {
+    width: 100%;
+    min-width: 100%;
+  }
+
+  .doctor-assigned-filters {
+    grid-template-columns: 1fr;
+  }
+
+  .case-diagnosis-checklist-result__grid {
+    grid-template-columns: 1fr;
+    gap: 8px;
   }
 }
 
@@ -877,8 +1044,9 @@ tbody tr:hover {
   input,
   select,
   textarea {
-    padding: 10px;
-    font-size: 0.92rem;
+    padding: 12px 10px;
+    font-size: 16px;
+    min-height: 44px;
   }
 
   button,
@@ -886,24 +1054,234 @@ tbody tr:hover {
   .tab-btn {
     width: 100%;
     text-align: center;
+    min-height: 44px;
+    padding: 12px 10px;
+    font-size: 0.95rem;
   }
 
   .side-nav__btn,
   .side-nav__link,
   .side-nav a {
-    padding: 9px 10px;
+    padding: 12px 10px;
     font-size: 0.9rem;
+    min-height: 44px;
   }
 
   table th,
   table td {
-    font-size: 0.84rem;
+    font-size: 0.75rem;
     white-space: nowrap;
+    padding: 6px 4px;
   }
 
   .msg {
     font-size: 0.88rem;
-    padding: 8px 10px;
+    padding: 10px 12px;
+  }
+
+  .workspace-grid {
+    grid-template-columns: 1fr;
+    gap: 8px;
+  }
+
+  .side-nav {
+    display: none;
+    position: absolute;
+    top: 60px;
+    left: 0;
+    right: 0;
+    width: 100%;
+    z-index: 100;
+    border-radius: 0;
+    border-top: 1px solid #d6e2f1;
+  }
+
+  .side-nav.mobile-open {
+    display: block;
+  }
+
+  .fullscreen-layout {
+    padding: 8px;
+  }
+
+  .top-header {
+    padding: 8px 12px;
+    margin-bottom: 8px;
+    gap: 8px;
+  }
+
+  .top-header__actions {
+    width: 100%;
+    justify-content: space-between;
+  }
+
+  .top-header__left {
+    flex: 1 1 100%;
+    min-width: 0;
+  }
+
+  .stat-card {
+    padding: 10px;
+  }
+
+  .stat-card .value {
+    font-size: 1.1rem;
+  }
+
+  .claim-pagination {
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  .claim-pagination__left {
+    width: 100%;
+    flex-direction: column;
+  }
+
+  .claim-pagination__actions {
+    width: 100%;
+  }
+
+  .claim-pagination__actions button {
+    flex: 1 1 auto;
+    min-width: 44px;
+  }
+
+  .case-detail-key {
+    width: 100%;
+  }
+
+  .case-report-full-body .t th {
+    width: auto;
+  }
+
+  .modal-card {
+    padding: 12px;
+    border-radius: 12px;
+  }
+
+  .modal-header {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+
+  .action-row {
+    flex-direction: column;
+  }
+
+  .action-row button,
+  .action-row .btn {
+    width: 100%;
+  }
+
+  .role-switch-form {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .role-switch-form select {
+    width: 100%;
+  }
+
+  .claim-status-filters {
+    grid-template-columns: 1fr !important;
+  }
+
+  .stats-grid {
+    grid-template-columns: 1fr;
+    gap: 10px;
+  }
+
+  .content-panel {
+    padding: 10px;
+    border-radius: 10px;
+  }
+
+  .panel {
+    padding: 12px;
+  }
+
+  .link-row {
+    flex-direction: column;
+  }
+
+  .link-row .btn,
+  .link-row button {
+    width: 100%;
+  }
+
+  .grid-2 {
+    grid-template-columns: 1fr;
+    gap: 10px;
+  }
+
+  .tab-list {
+    flex-direction: column;
+  }
+
+  .tab-btn {
+    width: 100%;
+  }
+
+  .doctor-assigned-filters {
+    grid-template-columns: 1fr !important;
+  }
+}
+
+@media (max-width: 360px) {
+  body {
+    font-size: 14px;
+  }
+
+  h1 {
+    font-size: 1.1rem;
+  }
+
+  h2 {
+    font-size: 1rem;
+  }
+
+  h3 {
+    font-size: 0.9rem;
+  }
+
+  .top-header h1 {
+    font-size: 0.9rem;
+    margin: 0;
+  }
+
+  input,
+  select,
+  textarea {
+    padding: 10px 8px;
+    font-size: 16px;
+  }
+
+  button,
+  .btn {
+    padding: 10px 8px;
+    font-size: 0.85rem;
+  }
+
+  table {
+    font-size: 0.65rem;
+  }
+
+  table th,
+  table td {
+    padding: 4px 2px;
+  }
+
+  .panel {
+    padding: 10px;
+  }
+
+  .content-panel {
+    padding: 8px;
+  }
+
+  .modal-card {
+    padding: 10px;
   }
 }
 
