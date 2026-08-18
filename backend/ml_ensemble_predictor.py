@@ -6,8 +6,8 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 # Ensemble configuration
-XGBOOST_WEIGHT = 0.55  # XGBoost: 70.4% accuracy
-NAIVE_BAYES_WEIGHT = 0.45  # Naive Bayes: better on different data
+XGBOOST_WEIGHT = 0.55
+NAIVE_BAYES_WEIGHT = 0.45
 CONFIDENCE_THRESHOLD = 0.55  # Min confidence to use prediction
 DISAGREEMENT_THRESHOLD = 0.20  # Flag for manual review if diff > 20%
 
@@ -15,9 +15,9 @@ DISAGREEMENT_THRESHOLD = 0.20  # Flag for manual review if diff > 20%
 def get_xgboost_prediction(structured_json: dict) -> dict[str, Any] | None:
     """Get XGBoost model prediction."""
     try:
-        from ml_claim_predictor import ClaimPredictor
+        from ml_claim_predictor import get_predictor
 
-        predictor = ClaimPredictor()
+        predictor = get_predictor()
         result = predictor.predict(structured_json)
 
         if result and result.get("recommendation"):
@@ -26,6 +26,8 @@ def get_xgboost_prediction(structured_json: dict) -> dict[str, Any] | None:
                 "confidence": float(result.get("confidence", 0.0)),
                 "model_version": result.get("model_version"),
                 "model": "xgboost",
+                "probabilities": result.get("probabilities") or {},
+                "metrics": result.get("model_metrics") or {},
             }
     except Exception as e:
         logger.warning(f"XGBoost prediction failed: {e}")
@@ -42,22 +44,20 @@ def get_naive_bayes_prediction(structured_json: dict) -> dict[str, Any] | None:
             from app.db.session import SessionLocal
 
             db = SessionLocal()
-            claim_text = " ".join(
-                str(structured_json.get(field, ""))
-                for field in [
-                    "diagnosis",
-                    "findings",
-                    "investigation_finding_in_details",
-                    "medicine_used",
-                ]
-            )
-
-            prediction = predict_claim_recommendation(
-                db=db,
-                claim_text=claim_text,
-                force_retrain=False,
-            )
-            db.close()
+            try:
+                claim_text = " ".join(
+                    str(structured_json.get(field, ""))
+                    for field in [
+                        "diagnosis", "complaints", "findings",
+                        "investigation_finding_in_details",
+                        "deranged_investigation", "medicine_used",
+                    ]
+                )
+                prediction = predict_claim_recommendation(
+                    db=db, claim_text=claim_text, force_retrain=False,
+                )
+            finally:
+                db.close()
 
             if prediction.available and prediction.label:
                 return {
@@ -213,6 +213,9 @@ def predict_with_ensemble(structured_json: dict) -> dict[str, Any]:
 
     This is the main entry point for Stage 3 report generation.
 
+    Note: Naive Bayes disabled due to DB connection pool exhaustion.
+    Uses XGBoost only for now to reduce load.
+
     Returns:
         {
             "recommendation": "approve|reject|need_more_evidence",
@@ -223,19 +226,26 @@ def predict_with_ensemble(structured_json: dict) -> dict[str, Any]:
             "agreement": bool,
         }
     """
+    import os
 
-    # Get predictions from both models
-    xgboost_pred = get_xgboost_prediction(structured_json)
-    naive_bayes_pred = get_naive_bayes_prediction(structured_json)
+    # Check if ensemble mode is explicitly enabled
+    use_ensemble = os.getenv('ENSEMBLE_MODE', 'xgboost_only') == 'full'
 
-    # Combine using ensemble logic
-    ensemble_result = combine_predictions(xgboost_pred, naive_bayes_pred)
+    if use_ensemble:
+        # Get predictions from both models
+        xgboost_pred = get_xgboost_prediction(structured_json)
+        naive_bayes_pred = get_naive_bayes_prediction(structured_json)
+        ensemble_result = combine_predictions(xgboost_pred, naive_bayes_pred)
+    else:
+        # XGBoost-only mode (default) - avoids DB connection pool exhaustion
+        xgboost_pred = get_xgboost_prediction(structured_json)
+        ensemble_result = combine_predictions(xgboost_pred, None)
 
     logger.info(
-        f"📊 Ensemble Result: {ensemble_result['recommendation']} "
+        f"📊 Prediction Result: {ensemble_result['recommendation']} "
         f"(confidence: {ensemble_result['confidence']:.1%}, "
         f"source: {ensemble_result['decision_source']}, "
-        f"models: {', '.join(ensemble_result['models_used']) or 'none'})"
+        f"models: {', '.join(ensemble_result['models_used']) or 'xgboost'})"
     )
 
     return ensemble_result
