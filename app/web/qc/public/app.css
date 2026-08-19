@@ -861,15 +861,17 @@ p, span, div, li, td, th {
   .side-nav {
     display: none !important;
     position: fixed;
-    top: 60px;
+    top: 50px;
     left: 0;
     width: 280px;
     max-width: 80vw;
-    height: calc(100vh - 60px);
+    height: calc(100vh - 50px);
     z-index: 999;
     overflow-y: auto;
     border-radius: 0;
     border-right: 1px solid #d6e2f1;
+    padding: 12px;
+    background: linear-gradient(180deg, #ffffffde, #f6fbffde);
   }
 
   .side-nav.mobile-open {
