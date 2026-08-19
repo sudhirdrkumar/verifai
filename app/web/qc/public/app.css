@@ -73,13 +73,20 @@ a {
   display: none;
   background: none;
   border: none;
-  color: inherit;
+  color: #0f4f86;
   cursor: pointer;
   padding: 8px;
   min-width: 44px;
   min-height: 44px;
   font-size: 1.5rem;
   z-index: 101;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.mobile-menu-toggle:hover {
+  opacity: 0.8;
 }
 
 .mobile-menu-overlay {
@@ -97,11 +104,50 @@ a {
   display: block;
 }
 
+.side-nav.mobile-open {
+  display: flex;
+  flex-direction: column;
+}
+
+@media (max-width: 768px) {
+  .mobile-menu-toggle {
+    display: flex;
+  }
+
+  .side-nav {
+    display: none !important;
+    position: fixed;
+    top: 60px;
+    left: 0;
+    height: calc(100vh - 60px);
+    width: 280px;
+    max-width: 80vw;
+    z-index: 999;
+    overflow-y: auto;
+    -webkit-overflow-scrolling: touch;
+    border-radius: 0;
+    border-right: 1px solid #d6e2f1;
+    padding: 16px 12px;
+    background: linear-gradient(180deg, #ffffffde, #f6fbffde);
+  }
+
+  .side-nav.mobile-open {
+    display: flex !important;
+    flex-direction: column;
+  }
+
+  .workspace-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
 @media (max-width: 640px) {
   .mobile-menu-toggle {
     display: flex;
-    align-items: center;
-    justify-content: center;
+  }
+
+  .side-nav {
+    width: 260px;
   }
 }
 
@@ -363,7 +409,7 @@ p, span, div, li, td, th {
   display: flex;
   justify-content: space-between;
   flex-wrap: wrap;
-  gap: 14px;
+  gap: 12px;
   align-items: center;
   width: 100%;
   max-width: 100%;
@@ -371,9 +417,13 @@ p, span, div, li, td, th {
   backdrop-filter: blur(6px);
   border: 1px solid rgba(20, 93, 160, 0.17);
   border-radius: 16px;
-  padding: 14px 16px;
+  padding: 12px 14px;
   margin-bottom: 14px;
   box-shadow: var(--shadow-sm);
+}
+
+.top-header .mobile-menu-toggle {
+  order: -1;
 }
 
 .top-header h1 {
@@ -840,9 +890,9 @@ p, span, div, li, td, th {
   }
 }
 
-@media (max-width: 980px) {
+@media (max-width: 768px) {
   .claim-status-filters {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
+    grid-template-columns: 1fr;
   }
   .workspace-grid {
     grid-template-columns: 1fr;

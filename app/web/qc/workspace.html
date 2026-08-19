@@ -12,12 +12,14 @@
 </head>
 <body class="app-body fullscreen-layout">
   <header class="top-header">
+    <button class="mobile-menu-toggle" id="mobile-menu-btn" aria-label="Toggle navigation menu" aria-expanded="false">☰</button>
     <div class="top-header__left">
       <h1 id="page-title">VerifAI</h1>
       <p class="muted" id="welcome-line">Welcome</p>
     </div>
     <nav class="top-header__actions" aria-label="Header actions" id="header-actions"></nav>
   </header>
+  <div class="mobile-menu-overlay" id="mobile-menu-overlay"></div>
 
   <main class="workspace-grid">
     <aside class="side-nav" aria-label="Navigation">
@@ -37,6 +39,42 @@
     window.updateUploadAfterPromptProgress = window.updateUploadAfterPromptProgress || function () {};
     var showUploadAfterPrompt = window.showUploadAfterPrompt;
     var updateUploadAfterPromptProgress = window.updateUploadAfterPromptProgress;
+
+    // Mobile menu toggle
+    document.addEventListener('DOMContentLoaded', function() {
+      const menuBtn = document.getElementById('mobile-menu-btn');
+      const sideNav = document.querySelector('.side-nav');
+      const overlay = document.getElementById('mobile-menu-overlay');
+
+      function toggleMenu() {
+        const isOpen = sideNav.classList.toggle('mobile-open');
+        overlay.classList.toggle('open', isOpen);
+        menuBtn.setAttribute('aria-expanded', isOpen);
+      }
+
+      function closeMenu() {
+        sideNav.classList.remove('mobile-open');
+        overlay.classList.remove('open');
+        menuBtn.setAttribute('aria-expanded', 'false');
+      }
+
+      menuBtn.addEventListener('click', toggleMenu);
+      overlay.addEventListener('click', closeMenu);
+
+      // Close menu when clicking nav links
+      const navLinks = document.querySelectorAll('.side-nav button, .side-nav a');
+      navLinks.forEach(link => {
+        link.addEventListener('click', closeMenu);
+      });
+
+      // Close menu on window resize if going back to desktop
+      window.addEventListener('resize', function() {
+        if (window.innerWidth > 768) {
+          closeMenu();
+          sideNav.style.display = '';
+        }
+      });
+    });
   </script>
     <script src="/qc/public/workspace-20260815h.js?v=15"></script>
 </body>
