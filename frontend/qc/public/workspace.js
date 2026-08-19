@@ -2066,11 +2066,11 @@
     const force = !!opts.force;
     const preferOpenAI = !!opts.preferOpenAI;
     const strictOpenAI = !!opts.strictOpenAI;
-    const extractionProviderRaw = String(opts.extractionProvider || 'gemini').trim().toLowerCase();
-    const extractionProvider = ['gemini', 'openai'].includes(extractionProviderRaw)
+    const extractionProviderRaw = String(opts.extractionProvider || 'openai').trim().toLowerCase();
+    const extractionProvider = ['openai'].includes(extractionProviderRaw)
       ? extractionProviderRaw
-      : 'gemini';
-    const extractionProviderLabel = extractionProvider === 'gemini' ? 'Gemini' : (extractionProvider === 'openai' ? 'OpenAI' : extractionProvider);
+      : 'openai';
+    const extractionProviderLabel = extractionProvider === 'openai' ? 'VerifAI' : extractionProvider;
     const allowAutoFallback = false;
     const onProgress = typeof opts.onProgress === 'function' ? opts.onProgress : function () {};
     const onLog = typeof opts.onLog === 'function' ? opts.onLog : function () {};
@@ -2151,13 +2151,13 @@
             const openaiExtract = await apiFetch('/api/v1/documents/' + encodeURIComponent(docId) + '/extract', {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ provider: 'gemini', actor_id: actorId, force_refresh: !!force }),
+              body: JSON.stringify({ provider: 'openai', actor_id: actorId, force_refresh: !!force }),
             });
             extracted = true;
-            onLog('Extracted with Gemini: ' + docName);
+            onLog('Extracted with VerifAI: ' + docName);
             if (openaiExtract && openaiExtract.raw_response) {
               const rawJson = JSON.stringify(openaiExtract.raw_response);
-              onLog('Gemini JSON response: ' + String(rawJson.length > 4000 ? rawJson.slice(0, 4000) + ' ...[truncated]' : rawJson));
+              onLog('VerifAI JSON response: ' + String(rawJson.length > 4000 ? rawJson.slice(0, 4000) + ' ...[truncated]' : rawJson));
             }
           } catch (err) {
             lastError = err;
@@ -2549,7 +2549,8 @@
     const isAuditorRole = activeRouteRole === 'auditor' || !!(me && me.role === 'auditor');
     const backPage = backPageParam || (activeRouteRole === 'user' ? 'upload-document' : (isAuditorRole ? 'audit-claims' : 'assigned-cases'));
     const preferredReportSourceParam = String(routeParams.get('report_source') || 'doctor').trim().toLowerCase();
-    let preferredReportSource = (preferredReportSourceParam === 'system' || preferredReportSourceParam === 'doctor') ? preferredReportSourceParam : 'doctor';
+    const validReportSources = ['system', 'doctor', 'auditor', 'edited'];
+    let preferredReportSource = validReportSources.includes(preferredReportSourceParam) ? preferredReportSourceParam : 'doctor';
 
     if (!claimUuid) {
       contentPanel.innerHTML = '<section class="claim-status-panel">'
@@ -2574,7 +2575,6 @@
       + '<div class="link-row case-detail-actions">'
       + '<button type="button" id="case-generate-report" disabled>Generate Report</button>'
       + '<button type="button" class="btn-soft" id="case-change-status" disabled>Mark Completed</button>'
-      + '<button type="button" class="btn-soft" id="case-queue-extraction" style="background:#10b981; color:white;" disabled>Queue for Extraction</button>'
       + '<span id="case-report-ready-state" class="muted" style="display:none;align-self:center;font-size:13px;font-weight:700;color:#047857;margin-left:8px;">Extraction ready for report</span>'
       + '</div>'
       + '<div id="case-extraction-progress" style="margin-top:10px; display:none;">'
@@ -5930,7 +5930,8 @@
     }
 
     async function loadSavedReportBySource(source, silentIfMissing, options) {
-      const targetSource = (String(source || 'doctor').toLowerCase() === 'system') ? 'system' : 'doctor';
+      const requestedSource = String(source || 'doctor').trim().toLowerCase();
+      const targetSource = ['system', 'doctor', 'auditor', 'edited'].includes(requestedSource) ? requestedSource : 'doctor';
       try {
         const opts = options || {};
         const allowStale = opts.allowStale !== false;
@@ -6046,7 +6047,6 @@
       hasExtractedData = false;
       renderVerifaiDoctorBucket();
       setActionDisabled(false);
-      const queueExtractionBtn = document.getElementById('case-queue-extraction');
 
       function isCurrentClaimQueuedToVerifAI() {
         const queueStatus = String((currentStatusItem && currentStatusItem.verifai_status) || '').trim().toLowerCase();
@@ -6064,15 +6064,6 @@
           queueStage === 'submitted'
         );
       }
-
-      function syncQueueExtractionButtonState() {
-        if (!queueExtractionBtn) return;
-        const queued = isCurrentClaimQueuedToVerifAI();
-        queueExtractionBtn.disabled = queued;
-        queueExtractionBtn.textContent = queued ? 'Queued to VerifAI' : 'Queue for Extraction';
-      }
-
-      syncQueueExtractionButtonState();
 
       if (String(currentStatusItem.verifai_case_id || '').trim()) {
         appendLog('Loading VerifAI doctor bucket for case ' + String(currentStatusItem.verifai_case_id || '') + '.');
@@ -6136,12 +6127,12 @@
         });
       });
 
-    const progressDiv = document.getElementById('case-extraction-progress');
-    const progressBar = document.getElementById('case-extraction-bar');
-    const progressStatus = document.getElementById('case-extraction-status');
-    const verifyExtractBtn = document.getElementById('verifyExtractBtn');
-    const forceVerifaiBtn = document.getElementById('forceVerifaiBtn');
-    let activeExtractionTimer = null;
+      const verifyExtractBtn = document.getElementById('case-verify-extract');
+      const forceVerifaiBtn = document.getElementById('case-force-verifai');
+      const progressDiv = document.getElementById('case-extraction-progress');
+      const progressBar = document.getElementById('case-extraction-bar');
+      const progressStatus = document.getElementById('case-extraction-status');
+      let activeExtractionTimer = null;
 
       function stopExtractionProgressTimer() {
         if (activeExtractionTimer) {
@@ -6170,8 +6161,29 @@
         me: me && me.username
       });
 
-      if (docs.length > 0) {
-        // Buttons enabled by default
+      const claimQueuedToVerifAI = isCurrentClaimQueuedToVerifAI();
+      if (docs.length > 0 && !claimQueuedToVerifAI) {
+        if (verifyExtractBtn) {
+          verifyExtractBtn.disabled = false;
+          verifyExtractBtn.removeAttribute('disabled');
+          console.log('Verify button enabled', { disabled: verifyExtractBtn.disabled, hasDisabledAttr: verifyExtractBtn.hasAttribute('disabled') });
+        }
+        if (forceVerifaiBtn) {
+          forceVerifaiBtn.disabled = false;
+          forceVerifaiBtn.removeAttribute('disabled');
+          console.log('Force VerifAI button enabled', { disabled: forceVerifaiBtn.disabled, hasDisabledAttr: forceVerifaiBtn.hasAttribute('disabled') });
+        }
+      } else if (claimQueuedToVerifAI) {
+        if (verifyExtractBtn) {
+          verifyExtractBtn.disabled = true;
+          verifyExtractBtn.setAttribute('disabled', 'disabled');
+          verifyExtractBtn.title = 'Claim already queued to VerifAI.';
+        }
+        if (forceVerifaiBtn) {
+          forceVerifaiBtn.disabled = true;
+          forceVerifaiBtn.setAttribute('disabled', 'disabled');
+          forceVerifaiBtn.title = 'Claim already queued to VerifAI.';
+        }
       }
 
       if (verifyExtractBtn) {
@@ -6193,11 +6205,11 @@
             if (progressBar) progressBar.style.width = '30%';
             setMessage('case-detail-msg', '', 'Starting extraction for: ' + docName);
             console.log('Sending extraction request to:', '/api/v1/documents/' + encodeURIComponent(docId) + '/extract');
-            console.log('Request payload:', { provider: 'gemini', actor_id: me && me.username ? me.username : '', force_refresh: false });
+            console.log('Request payload:', { provider: 'openai', actor_id: me && me.username ? me.username : '', force_refresh: false });
             startExtractionProgressTimer('Extracting: ' + docName);
             const job = await apiFetch('/api/v1/documents/' + encodeURIComponent(docId) + '/extract', {
               method: 'POST',
-              body: JSON.stringify({ provider: 'gemini', actor_id: me && me.username ? me.username : '', force_refresh: false }),
+              body: JSON.stringify({ provider: 'openai', actor_id: me && me.username ? me.username : '', force_refresh: false }),
             });
             const jobId = String((job && job.job_id) || '').trim();
             if (!jobId) {
@@ -6272,11 +6284,11 @@
               if (progressBar) progressBar.style.width = ((i+1)/docs.length*100) + '%';
               setMessage('case-detail-msg', '', 'Force re-extracting: ' + docName);
               console.log('Sending force extraction request to:', '/api/v1/documents/' + encodeURIComponent(docId) + '/extract');
-              console.log('Request payload:', { provider: 'gemini', actor_id: me && me.username ? me.username : '', force_refresh: true });
+              console.log('Request payload:', { provider: 'openai', actor_id: me && me.username ? me.username : '', force_refresh: true });
               startExtractionProgressTimer('Force re-extracting: ' + docName + ' (' + (i+1) + '/' + docs.length + ')');
               const job = await apiFetch('/api/v1/documents/' + encodeURIComponent(docId) + '/extract', {
                 method: 'POST',
-                body: JSON.stringify({ provider: 'gemini', actor_id: me && me.username ? me.username : '', force_refresh: true }),
+                body: JSON.stringify({ provider: 'openai', actor_id: me && me.username ? me.username : '', force_refresh: true }),
               });
               const jobId = String((job && job.job_id) || '').trim();
               if (!jobId) {
@@ -6355,28 +6367,6 @@
           console.log('✅ ALL FORCE EXTRACTIONS COMPLETED');
         });
       }
-
-      if (queueExtractionBtn) {
-        queueExtractionBtn.addEventListener('click', async function() {
-          if (isCurrentClaimQueuedToVerifAI()) {
-            setMessage('case-detail-msg', 'ok', 'Claim is already queued for VerifAI processing.');
-            syncQueueExtractionButtonState();
-            return;
-          }
-          try {
-            queueExtractionBtn.disabled = true;
-            queueExtractionBtn.textContent = 'Queueing...';
-            const result = await apiFetch('/api/v1/claims/' + encodeURIComponent(claimUuid) + '/process', { method: 'POST' });
-            setMessage('case-detail-msg', 'ok', 'Claim queued for extraction processing! Status: ' + (result.status || 'queued'));
-            queueExtractionBtn.textContent = 'Queued to VerifAI';
-            queueExtractionBtn.disabled = true;
-          } catch (err) {
-            setMessage('case-detail-msg', 'err', 'Failed to queue claim: ' + (err.message || String(err)));
-            syncQueueExtractionButtonState();
-          }
-        });
-      }
-
       const loadedPreferred = await loadSavedReportBySource(preferredReportSource, true, { allowStale: false });
       if (!loadedPreferred && preferredReportSource === 'doctor') {
         await loadSavedReportBySource('system', true, { allowStale: false });
@@ -7184,7 +7174,7 @@
                 const job = await apiFetch('/api/v1/documents/' + encodeURIComponent(docId) + '/extract', {
                   method: 'POST',
                   body: JSON.stringify({
-                    provider: 'gemini',
+                    provider: 'openai',
                     actor_id: String((me && me.username) || 'ui-user'),
                     force_refresh: true,
                   }),
@@ -8072,7 +8062,8 @@
       if (!claimUuid) return;
 
       reportEditorCurrentRow = row;
-      reportEditorCurrentSource = (String(reportSource || 'doctor').toLowerCase() === 'system') ? 'system' : 'doctor';
+      const requestedSource = String(reportSource || 'doctor').trim().toLowerCase();
+      reportEditorCurrentSource = 'edited';
       if (reportEditorClaimLabelEl) {
         reportEditorClaimLabelEl.textContent = 'Claim ID: ' + (claimId || '-');
       }
@@ -8083,7 +8074,9 @@
       openReportEditorModal();
 
       try {
-        const payload = await apiFetch('/api/v1/user-tools/completed-reports/' + encodeURIComponent(claimUuid) + '/latest-html?source=' + encodeURIComponent(reportEditorCurrentSource));
+        const payload = requestedSource === 'best'
+          ? await fetchBestSavedReport(claimUuid)
+          : await apiFetch('/api/v1/user-tools/completed-reports/' + encodeURIComponent(claimUuid) + '/latest-html?source=' + encodeURIComponent(requestedSource));
         const html = normalizeHealthClaimReportTitle(String(payload && payload.report_html ? payload.report_html : '').trim());
         if (!html) {
           throw new Error('No saved report HTML found for this source.');
@@ -8157,7 +8150,7 @@
     async function fetchBestSavedReport(claimUuid) {
       const id = String(claimUuid || '').trim();
       if (!id) throw new Error('Claim key missing.');
-      const sources = ['doctor', 'system', 'any'];
+      const sources = ['edited', 'auditor', 'doctor', 'system', 'any'];
       let lastErr = null;
       for (let i = 0; i < sources.length; i += 1) {
         const src = sources[i];
@@ -8632,7 +8625,7 @@
           const rowHasSystemReport = !!row.system_report_html_available || rowHasReportHtml;
           try {
             if (rowHasDoctorReport) {
-              await openEditableReport(row, 'doctor');
+              await openEditableReport(row, 'best');
             } else if (rowHasSystemReport) {
               await openEditableReport(row, 'system');
             } else {
@@ -10078,7 +10071,7 @@ async function renderLegacyMigration() {
         extraction: extraction,
         structure: structure,
         report: report,
-        canQueue: documents > 0 && queued === 0 && running === 0 && succeeded === 0 && structured === 0 && reports === 0,
+        canQueue: documents > 0 && queued === 0 && running === 0,
       };
     }
 
@@ -10195,7 +10188,8 @@ async function renderLegacyMigration() {
           const canQueue = stages.canQueue;
           if (!canQueue) state.selectedClaims.delete(claimUuid);
           const actionLabel = canQueue
-            ? (Number(item.extraction_failed || 0) > 0 ? 'Retry Queue' : 'Queue Claim')
+            ? (stages.report.label === 'Completed' ? 'Requeue Claim'
+              : (Number(item.extraction_failed || 0) > 0 ? 'Retry Queue' : 'Queue Claim'))
             : (stages.report.label === 'Completed' ? 'Report Ready'
               : (stages.structure.label === 'Completed' ? 'Structured'
                 : (stages.extraction.label === 'Completed' ? 'Extracted' : stages.extraction.label)));
@@ -10587,6 +10581,7 @@ async function renderLegacyMigration() {
     if (page === 'upload-excel') return renderUploadExcel();
     if (page === 'assign-cases') return renderAssignCases();
     if (page === 'upload-document') return renderUploadDocument();
+    if (page === 'ai-queue') return renderAIQueue();
 
     if (page === 'withdrawn-claims') return renderWithdrawnClaims();
 
@@ -10604,7 +10599,6 @@ async function renderLegacyMigration() {
     if (page === 'medicines') return renderMedicines();
     if (page === 'storage-maintenance') return renderStorageMaintenance();
     if (page === 'ai-prompt') return renderAIPrompt();
-    if (page === 'ai-queue') return renderAIQueue();
     if (page === 'legacy-sync') return renderLegacyMigration();
 
     contentPanel.innerHTML = '<h2>Not Found</h2><p class="muted">This QC module path is not mapped yet.</p>';
