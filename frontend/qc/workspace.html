@@ -7,17 +7,26 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600;700;800&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="/qc/public/app.css?v=20260403a">
+  <link rel="stylesheet" href="/qc/public/app.css?v=20260819b">
   <script>window.learningToolsRuntime = window.learningToolsRuntime || {};</script>
+  <style>
+    @media (max-width: 768px) {
+      .side-nav { display: none !important; }
+      .side-nav.mobile-open { display: flex !important; }
+      .mobile-menu-toggle { display: flex !important; }
+    }
+  </style>
 </head>
 <body class="app-body fullscreen-layout">
-  <header class="top-header">
+  <header class="top-header" style="display: flex; justify-content: space-between; align-items: center; padding: 8px 14px; background: linear-gradient(135deg, #ffffffea, #f4faffdd); border: 1px solid rgba(20, 93, 160, 0.17); margin-bottom: 14px;">
+    <button class="mobile-menu-toggle" id="mobile-menu-btn" aria-label="Toggle navigation menu" aria-expanded="false" style="display: none; background: none; color: #0f4f86; border: none; padding: 8px; font-size: 1.5rem; cursor: pointer; min-width: 44px; min-height: 44px; flex-shrink: 0;">☰</button>
     <div class="top-header__left">
       <h1 id="page-title">VerifAI</h1>
       <p class="muted" id="welcome-line">Welcome</p>
     </div>
     <nav class="top-header__actions" aria-label="Header actions" id="header-actions"></nav>
   </header>
+  <div class="mobile-menu-overlay" id="mobile-menu-overlay"></div>
 
   <main class="workspace-grid">
     <aside class="side-nav" aria-label="Navigation">
@@ -35,8 +44,71 @@
   <script>
     window.showUploadAfterPrompt = window.showUploadAfterPrompt || function () {};
     window.updateUploadAfterPromptProgress = window.updateUploadAfterPromptProgress || function () {};
+    var showUploadAfterPrompt = window.showUploadAfterPrompt;
+    var updateUploadAfterPromptProgress = window.updateUploadAfterPromptProgress;
+
+    // Mobile menu toggle
+    document.addEventListener('DOMContentLoaded', function() {
+      console.log('✅ DOMContentLoaded fired - initializing mobile menu');
+      const menuBtn = document.getElementById('mobile-menu-btn');
+      const sideNav = document.querySelector('.side-nav');
+      const overlay = document.getElementById('mobile-menu-overlay');
+      console.log('menuBtn:', menuBtn, 'sideNav:', sideNav, 'overlay:', overlay);
+
+      function enforceResponsive() {
+        const width = window.innerWidth;
+        console.log('🔍 enforceResponsive: width=' + width);
+        if (width <= 768) {
+          sideNav.style.display = 'none';
+          menuBtn.style.display = 'flex';
+          console.log('📱 MOBILE MODE: showing hamburger, hiding sidebar');
+        } else {
+          sideNav.style.display = 'flex';
+          menuBtn.style.display = 'none';
+          console.log('🖥️ DESKTOP MODE: hiding hamburger, showing sidebar');
+        }
+      }
+
+      function toggleMenu() {
+        const isOpen = sideNav.classList.toggle('mobile-open');
+        overlay.classList.toggle('open', isOpen);
+        menuBtn.setAttribute('aria-expanded', isOpen);
+        if (isOpen) {
+          sideNav.style.display = 'flex';
+        } else {
+          enforceResponsive();
+        }
+      }
+
+      function closeMenu() {
+        sideNav.classList.remove('mobile-open');
+        overlay.classList.remove('open');
+        menuBtn.setAttribute('aria-expanded', 'false');
+        enforceResponsive();
+      }
+
+      enforceResponsive();
+      window.addEventListener('resize', enforceResponsive);
+
+      menuBtn.addEventListener('click', toggleMenu);
+      overlay.addEventListener('click', closeMenu);
+
+      // Close menu when clicking nav links
+      const navLinks = document.querySelectorAll('.side-nav button, .side-nav a');
+      navLinks.forEach(link => {
+        link.addEventListener('click', closeMenu);
+      });
+
+      // Close menu on window resize if going back to desktop
+      window.addEventListener('resize', function() {
+        if (window.innerWidth > 768) {
+          closeMenu();
+          sideNav.style.display = '';
+        }
+      });
+    });
   </script>
-    <script src="/qc/public/workspace-20260815i.js?v=20260816c"></script>
+    <script src="/qc/public/workspace-20260815h.js?v=15"></script>
 </body>
 </html>
 
