@@ -165,19 +165,19 @@
 <span class="font-headline-lg text-headline-lg text-primary tracking-tight" id="page-title">VerifAI</span>
 <span class="font-body-md text-body-md text-on-surface-variant" id="welcome-line">Welcome, Super Admin</span>
 </div>
-<div id="header-actions" class="flex gap-sm">
+<div id="header-actions" class="flex gap-sm hidden md:flex">
 <!-- Actions inserted by workspace.js -->
 </div>
-<button id="mobile-menu-btn" class="text-primary hover:bg-surface-container-low p-xs rounded-full transition-colors">
+<button id="mobile-menu-btn" class="text-primary hover:bg-surface-container-low p-xs rounded-full transition-colors md:hidden">
 <span class="material-symbols-outlined text-2xl">menu</span>
 </button>
 </header>
 
 <!-- Mobile Menu Overlay -->
-<div id="mobile-menu-overlay" class="fixed inset-0 bg-black/50 z-30 hidden md:hidden" onclick="closeMobileMenu()"></div>
+<div id="mobile-menu-overlay" class="fixed inset-0 bg-black/50 z-30 hidden" onclick="closeMobileMenu()"></div>
 
 <!-- SideNavBar -->
-<nav id="side-nav" class="bg-surface-container-lowest text-primary font-headline-sm text-headline-sm font-label-md text-label-md fixed left-0 top-0 h-screen w-sidebar-width border-r border-outline-variant shadow-sm flex flex-col h-full py-lg pr-md gap-base hidden md:flex z-50 transition-transform duration-200 md:fixed md:left-0 md:top-0 md:h-screen">
+<nav id="side-nav" class="bg-surface-container-lowest text-primary font-headline-sm text-headline-sm font-label-md text-label-md fixed left-0 top-0 h-screen w-sidebar-width border-r border-outline-variant shadow-sm flex flex-col py-lg pr-md gap-base hidden md:flex z-50 transition-transform duration-200">
 <div class="px-md pb-md border-b border-outline-variant mb-md">
 <h1 class="font-headline-md text-headline-md text-primary tracking-tight mb-xs">VerifAI</h1>
 <p class="font-body-md text-body-md text-on-surface-variant">Super Admin Portal</p>
