@@ -49,18 +49,23 @@
 
     // Mobile menu toggle
     document.addEventListener('DOMContentLoaded', function() {
+      console.log('✅ DOMContentLoaded fired - initializing mobile menu');
       const menuBtn = document.getElementById('mobile-menu-btn');
       const sideNav = document.querySelector('.side-nav');
       const overlay = document.getElementById('mobile-menu-overlay');
+      console.log('menuBtn:', menuBtn, 'sideNav:', sideNav, 'overlay:', overlay);
 
       function enforceResponsive() {
         const width = window.innerWidth;
+        console.log('🔍 enforceResponsive: width=' + width);
         if (width <= 768) {
           sideNav.style.display = 'none';
           menuBtn.style.display = 'flex';
+          console.log('📱 MOBILE MODE: showing hamburger, hiding sidebar');
         } else {
           sideNav.style.display = 'flex';
           menuBtn.style.display = 'none';
+          console.log('🖥️ DESKTOP MODE: hiding hamburger, showing sidebar');
         }
       }
 
