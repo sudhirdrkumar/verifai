@@ -53,17 +53,37 @@
       const sideNav = document.querySelector('.side-nav');
       const overlay = document.getElementById('mobile-menu-overlay');
 
+      function enforceResponsive() {
+        const width = window.innerWidth;
+        if (width <= 768) {
+          sideNav.style.display = 'none';
+          menuBtn.style.display = 'flex';
+        } else {
+          sideNav.style.display = 'flex';
+          menuBtn.style.display = 'none';
+        }
+      }
+
       function toggleMenu() {
         const isOpen = sideNav.classList.toggle('mobile-open');
         overlay.classList.toggle('open', isOpen);
         menuBtn.setAttribute('aria-expanded', isOpen);
+        if (isOpen) {
+          sideNav.style.display = 'flex';
+        } else {
+          enforceResponsive();
+        }
       }
 
       function closeMenu() {
         sideNav.classList.remove('mobile-open');
         overlay.classList.remove('open');
         menuBtn.setAttribute('aria-expanded', 'false');
+        enforceResponsive();
       }
+
+      enforceResponsive();
+      window.addEventListener('resize', enforceResponsive);
 
       menuBtn.addEventListener('click', toggleMenu);
       overlay.addEventListener('click', closeMenu);
