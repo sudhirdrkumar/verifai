@@ -730,11 +730,22 @@
     });
   }
 
+  const iconMap = {
+    'dashboard': 'dashboard', 'doctor-ratings': 'star', 'create-user': 'person_add',
+    'change-password': 'lock', 'reset-password': 'password', 'bank-details': 'account_balance',
+    'payment-sheet': 'payments', 'upload-excel': 'upload_file', 'claim-rules': 'rule',
+    'diagnosis-criteria': 'description', 'rule-suggestions': 'lightbulb', 'medicines': 'medication',
+    'storage-maintenance': 'storage', 'ai-prompt': 'smart_toy', 'legacy-migration': 'data_migration'
+  };
+
   function renderNav(activeRole, activePage) {
     const links = NAV[activeRole] || [];
     sideNavEl.innerHTML = links.map((item) => {
-      const activeClass = item.page === activePage ? " active" : "";
-      return '<a class="side-nav__link' + activeClass + '" href="' + navHref(activeRole, item.page) + '">' + escapeHtml(item.label) + "</a>";
+      const isActive = item.page === activePage;
+      const icon = iconMap[item.page] || 'description';
+      const activeClass = isActive ? ' bg-primary text-on-primary border-l-4 border-primary rounded-r-full font-bold' : ' text-secondary hover:bg-surface-container-low transition-all duration-200 rounded-r-full';
+      return '<li><a class="flex items-center gap-sm px-md py-sm' + activeClass + '" href="' + navHref(activeRole, item.page) + '">' +
+        '<span class="material-symbols-outlined">' + icon + '</span>' + escapeHtml(item.label) + '</a></li>';
     }).join("");
   }
 
