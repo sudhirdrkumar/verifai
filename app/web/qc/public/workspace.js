@@ -695,38 +695,39 @@
     pageTitleEl.textContent = (ROLE_LABELS[activeRole] || activeRole) + " " + (PAGE_TITLES[page] || "Workspace");
     welcomeLineEl.textContent = "Welcome, " + user.username + " (" + (ROLE_LABELS[activeRole] || activeRole) + ")";
 
-    const canSwitchRole = user.role === "super_admin";
-    const roleSwitch = canSwitchRole
-      ? '<form class="role-switch-form" onsubmit="return false;">'
-        + '<label class="role-switch-form__label" for="acting-role-switch">Role</label>'
-        + '<select id="acting-role-switch">'
-        + '<option value="super_admin"' + (activeRole === "super_admin" ? " selected" : "") + '>Super Admin</option>'
-        + '<option value="doctor"' + (activeRole === "doctor" ? " selected" : "") + '>Doctor</option>'
-        + '<option value="user"' + (activeRole === "user" ? " selected" : "") + '>User</option>'
-        + '<option value="auditor"' + (activeRole === "auditor" ? " selected" : "") + '>Auditor</option>'
-        + "</select></form>"
-      : "";
-
-    headerActions.innerHTML = roleSwitch
-      + '<a class="btn btn-soft" href="/">Home</a>'
-      + '<button id="btn-logout" type="button">Logout</button>';
-
+    // Populate the role selector if it exists
     const switchEl = document.getElementById("acting-role-switch");
     if (switchEl) {
-      switchEl.addEventListener("change", function () {
-        const role = this.value;
-        localStorage.setItem("qc_acting_role", role);
-        window.location.href = "/qc/" + role + "/dashboard";
-      });
+      const canSwitchRole = user.role === "super_admin";
+      if (canSwitchRole) {
+        switchEl.innerHTML = '<option value="super_admin"' + (activeRole === "super_admin" ? " selected" : "") + '>Super Admin</option>'
+          + '<option value="doctor"' + (activeRole === "doctor" ? " selected" : "") + '>Doctor</option>'
+          + '<option value="user"' + (activeRole === "user" ? " selected" : "") + '>User</option>'
+          + '<option value="auditor"' + (activeRole === "auditor" ? " selected" : "") + '>Auditor</option>';
+        switchEl.addEventListener("change", function () {
+          const role = this.value;
+          localStorage.setItem("qc_acting_role", role);
+          window.location.href = "/qc/" + role + "/dashboard";
+        });
+      }
     }
 
-    document.getElementById("btn-logout").addEventListener("click", async function () {
-      try {
-        await apiFetch("/api/v1/auth/logout", { method: "POST" });
-      } catch (_err) {
-        // ignore
-      }
-      clearAuthAndRedirect();
+    // Setup header actions and logout button
+    const headerActionsHtml = '<a class="btn btn-soft" href="/" style="display:none;">Home</a>';
+    if (headerActions) {
+      headerActions.innerHTML = headerActionsHtml;
+    }
+
+    const logoutBtn = document.getElementById("btn-logout");
+    if (logoutBtn) {
+      logoutBtn.addEventListener("click", async function () {
+        try {
+          await apiFetch("/api/v1/auth/logout", { method: "POST" });
+        } catch (_err) {
+          // ignore
+        }
+        clearAuthAndRedirect();
+      });
     });
   }
 
