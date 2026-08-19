@@ -109,47 +109,6 @@ a {
   flex-direction: column;
 }
 
-@media (max-width: 768px) {
-  .mobile-menu-toggle {
-    display: flex;
-  }
-
-  .side-nav {
-    display: none !important;
-    position: fixed;
-    top: 60px;
-    left: 0;
-    height: calc(100vh - 60px);
-    width: 280px;
-    max-width: 80vw;
-    z-index: 999;
-    overflow-y: auto;
-    -webkit-overflow-scrolling: touch;
-    border-radius: 0;
-    border-right: 1px solid #d6e2f1;
-    padding: 16px 12px;
-    background: linear-gradient(180deg, #ffffffde, #f6fbffde);
-  }
-
-  .side-nav.mobile-open {
-    display: flex !important;
-    flex-direction: column;
-  }
-
-  .workspace-grid {
-    grid-template-columns: 1fr;
-  }
-}
-
-@media (max-width: 640px) {
-  .mobile-menu-toggle {
-    display: flex;
-  }
-
-  .side-nav {
-    width: 260px;
-  }
-}
 
 .panel {
   background: var(--card);
@@ -895,8 +854,26 @@ p, span, div, li, td, th {
 }
 
 @media (max-width: 768px) {
+  .mobile-menu-toggle {
+    display: flex;
+  }
+
   .side-nav {
     display: none !important;
+    position: fixed;
+    top: 60px;
+    left: 0;
+    width: 280px;
+    max-width: 80vw;
+    height: calc(100vh - 60px);
+    z-index: 999;
+    overflow-y: auto;
+    border-radius: 0;
+    border-right: 1px solid #d6e2f1;
+  }
+
+  .side-nav.mobile-open {
+    display: flex !important;
   }
 
   .claim-status-filters {
