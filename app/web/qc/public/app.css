@@ -392,8 +392,8 @@ tbody tr:hover {
 }
 
 .fullscreen-layout {
-  min-height: 100vh;
-  padding: 18px;
+  min-height: auto;
+  padding: 14px;
   word-break: break-word;
   overflow-wrap: break-word;
   hyphens: auto;
@@ -558,8 +558,9 @@ p, span, div, li, td, th {
 
 .content-area {
   display: grid;
-  gap: 14px;
+  gap: 8px;
   min-width: 0;
+  min-height: auto;
 }
 
 .content-panel {
@@ -570,6 +571,7 @@ p, span, div, li, td, th {
   padding: 18px;
   display: none;
   min-width: 0;
+  min-height: auto;
 }
 
 .content-panel.active {
