@@ -162,8 +162,11 @@
 <!-- TopNavBar - Mobile Only -->
 <header class="bg-surface-container-lowest text-primary font-headline-md text-headline-md font-body-md text-body-md font-label-md text-label-md flex justify-between items-center px-lg py-md w-full sticky top-0 z-40 border-b border-outline-variant shadow-sm md:hidden">
 <div class="flex flex-col">
-<span class="font-headline-lg text-headline-lg text-primary tracking-tight">VerifAI</span>
-<span class="font-body-md text-body-md text-on-surface-variant">Welcome, Super Admin</span>
+<span class="font-headline-lg text-headline-lg text-primary tracking-tight" id="page-title">VerifAI</span>
+<span class="font-body-md text-body-md text-on-surface-variant" id="welcome-line">Welcome, Super Admin</span>
+</div>
+<div id="header-actions" class="flex gap-sm">
+<!-- Actions inserted by workspace.js -->
 </div>
 <button id="mobile-menu-btn" class="text-primary hover:bg-surface-container-low p-xs rounded-full transition-colors">
 <span class="material-symbols-outlined text-2xl">menu</span>
@@ -205,9 +208,12 @@ Create User
 </li>
 </ul>
 <div class="px-md mt-auto pt-md border-t border-outline-variant">
+<select id="acting-role-switch" class="appearance-none w-full bg-surface border border-outline-variant rounded px-sm py-xs text-sm mb-sm pr-8 focus:ring-2 focus:ring-primary focus:border-primary">
+<option>Loading roles...</option>
+</select>
 <div class="flex gap-sm">
 <button class="flex-1 bg-primary text-on-primary hover:bg-primary-container transition-colors px-sm py-xs rounded font-label-md text-label-md">Home</button>
-<button class="flex-1 border border-primary text-primary hover:bg-surface-container-low transition-colors px-sm py-xs rounded font-label-md text-label-md">Logout</button>
+<button id="btn-logout" class="flex-1 border border-primary text-primary hover:bg-surface-container-low transition-colors px-sm py-xs rounded font-label-md text-label-md">Logout</button>
 </div>
 </div>
 </nav>
